@@ -12,6 +12,9 @@ from src.evaluation.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)
 
+# How often to log a progress summary (every N questions)
+PROGRESS_LOG_INTERVAL = 50
+
 
 def run_evaluation(
     model,
@@ -46,6 +49,10 @@ def run_evaluation(
 
     all_results = results_store.load_results(benchmark.name, condition.name)
     skipped = 0
+    processed = 0
+    correct_count = sum(1 for r in all_results if r.get("correct"))
+    total_inference_ms = sum(r.get("inference_time_ms", 0) for r in all_results)
+    run_start = time.time()
 
     for sample in tqdm(
         benchmark,
@@ -102,6 +109,27 @@ def run_evaluation(
         results_store.append_result(benchmark.name, condition.name, result)
         all_results.append(result)
 
+        processed += 1
+        if correct:
+            correct_count += 1
+        total_inference_ms += inference_ms
+
+        # Periodic progress logging (visible in log files even without tqdm)
+        if processed % PROGRESS_LOG_INTERVAL == 0:
+            done = len(all_results)
+            total = len(benchmark)
+            acc = correct_count / done * 100 if done > 0 else 0
+            avg_ms = total_inference_ms / done if done > 0 else 0
+            remaining = total - done
+            eta_s = remaining * avg_ms / 1000
+            elapsed = time.time() - run_start
+            logger.info(
+                f"Progress {benchmark.name}/{condition.name}: "
+                f"{done}/{total} ({done/total*100:.1f}%), "
+                f"acc={acc:.1f}%, avg={avg_ms:.0f}ms/q, "
+                f"ETA={eta_s/60:.0f}min, elapsed={elapsed/60:.1f}min"
+            )
+
     if skipped > 0:
         logger.info(f"Skipped {skipped} already-completed questions")
 
@@ -110,7 +138,7 @@ def run_evaluation(
     metrics["benchmark"] = benchmark.name
     metrics["condition"] = condition.name
     metrics["num_samples"] = len(all_results)
-    metrics["total_inference_ms"] = sum(r.get("inference_time_ms", 0) for r in all_results)
+    metrics["total_inference_ms"] = round(total_inference_ms, 1)
 
     logger.info(f"Results for {benchmark.name}/{condition.name}: {metrics}")
     return metrics
