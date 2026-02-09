@@ -13,8 +13,13 @@ class MMMUBenchmark(Benchmark):
     scoring_method = "mc_accuracy"
 
     def load(self, max_samples: int | None = None) -> None:
-        # MMMU validation set spans multiple subjects
-        dataset = load_dataset("MMMU/MMMU", split="validation")
+        # MMMU validation set spans multiple subjects — must load each and concatenate
+        from datasets import get_dataset_config_names
+        configs = get_dataset_config_names("MMMU/MMMU")
+        splits = []
+        for config in configs:
+            splits.append(load_dataset("MMMU/MMMU", config, split="validation"))
+        dataset = concatenate_datasets(splits)
         if max_samples:
             dataset = dataset.select(range(min(max_samples, len(dataset))))
         self._dataset = dataset
