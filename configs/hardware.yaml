@@ -1,0 +1,57 @@
+# Machine B: 3090
+machine_b:
+  name: "3090"
+  detection_keyword: "3090"
+  instances:
+    - gpu_ids: [0]
+      precision: "fp16"
+      load_8bit: false
+      benchmarks: ["gqa", "mmmu"]
+
+# Machine A: 4x Pascal Titan X
+machine_a:
+  name: "Pascal Titan X"
+  detection_keyword: "TITAN X"
+  instances:
+    - gpu_ids: [0, 1]
+      precision: "int8"
+      load_8bit: true
+      benchmarks: ["mmbench", "pope"]
+    - gpu_ids: [2, 3]
+      precision: "int8"
+      load_8bit: true
+      benchmarks: ["textvqa", "scienceqa"]
+
+# Fallback: 4-way FP16 on Machine A (if INT8 fails)
+machine_a_fallback:
+  name: "Pascal Titan X (4-way FP16)"
+  instances:
+    - gpu_ids: [0, 1, 2, 3]
+      precision: "fp16"
+      load_8bit: false
+      benchmarks: ["mmbench", "pope", "textvqa", "scienceqa"]
+
+# Development: Mac
+dev:
+  name: "Development (Mac/CPU)"
+  instances:
+    - gpu_ids: []
+      precision: "fp16"
+      load_8bit: false
+      device: "mps"
+      benchmarks: ["mmmu"]  # smallest for testing
+
+# Shared settings
+model:
+  name: "nyu-visionx/cambrian-8b"
+  model_name: "cambrian-8b"
+  conv_mode: "llama_3"
+  use_flash_attention: true
+  max_new_tokens: 128
+  temperature: 0.0
+  batch_size: 1
+
+conditions:
+  - "normal"
+  - "no_image"
+  - "wrong_image"
