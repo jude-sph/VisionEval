@@ -88,15 +88,20 @@ def main(results_dir: str = "results", output_dir: str | None = None):
     if not df.empty:
         from src.visualization.interactive.dashboard import create_dashboard
         from src.visualization.interactive.sankey import create_sankey
+        from src.visualization.interactive.scatter_explorer import create_scatter_explorer
+        from src.visualization.interactive.animated_bar import create_animated_bar
 
         create_dashboard(df, interactive_dir)
+        create_animated_bar(df, interactive_dir)
 
-        # Sankey needs per-question data
+        # Per-question visualizations need raw data
         all_results = {}
         for benchmark, condition in runs:
             key = (benchmark, condition)
             all_results[key] = store.load_results(benchmark, condition)
+
         create_sankey(all_results, interactive_dir)
+        create_scatter_explorer(all_results, interactive_dir)
 
         logger.info(f"Interactive plots saved to {interactive_dir}")
 
