@@ -1,9 +1,9 @@
-"""Auto-detect machine and launch evaluation jobs for assigned benchmarks.
+"""Launch evaluation jobs for assigned benchmarks on the current machine.
 
 Usage:
-    python scripts/run_machine.py              # Auto-detect
-    python scripts/run_machine.py --machine A  # Force Machine A (Pascal)
-    python scripts/run_machine.py --machine B  # Force Machine B (3090)
+    python scripts/run_machine.py              # Prompts which machine you're on
+    python scripts/run_machine.py --machine A  # Skip prompt, force Machine A (4x Pascal)
+    python scripts/run_machine.py --machine B  # Skip prompt, force Machine B (3090)
 """
 
 import os
@@ -50,21 +50,48 @@ MACHINE_A_INSTANCE_2 = [
 ]
 
 
-def detect_machine() -> str:
-    """Auto-detect which machine we're on based on GPU names."""
+def get_gpu_summary() -> str:
+    """Get a human-readable summary of GPUs on this machine."""
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap",
+             "--format=csv,noheader"],
             capture_output=True, text=True, timeout=10,
         )
-        gpu_names = result.stdout.strip()
-        if "3090" in gpu_names:
-            return "B"
-        if "TITAN X" in gpu_names or "TITAN Xp" in gpu_names:
-            return "A"
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-    return "unknown"
+    return "(could not query GPUs)"
+
+
+def prompt_machine() -> str:
+    """Ask the user which machine they're on, showing detected GPUs for context."""
+    gpu_info = get_gpu_summary()
+
+    print()
+    print("=" * 60)
+    print("  Which machine is this?")
+    print("=" * 60)
+    print()
+    print("  Detected GPUs:")
+    for line in gpu_info.splitlines():
+        print(f"    {line.strip()}")
+    print()
+    print("  A) Machine A — 4x Titan X Pascal (compute 6.1)")
+    print("     Runs: MMBench, POPE, TextVQA, ScienceQA")
+    print("     Config: INT8, 2 GPUs per instance, 2 parallel instances")
+    print()
+    print("  B) Machine B — 1x RTX 3090 (+ unusable Titan X Maxwell)")
+    print("     Runs: GQA, MMMU")
+    print("     Config: FP16, single GPU")
+    print()
+
+    while True:
+        choice = input("  Enter A or B: ").strip().upper()
+        if choice in ("A", "B"):
+            return choice
+        print("  Please enter A or B.")
 
 
 def run_jobs_sequential(jobs: list[tuple], max_samples: int | None = None):
@@ -96,19 +123,18 @@ def main(
     max_samples: int | None = None,
     dry_run: bool = False,
 ):
-    """Detect machine and run assigned evaluation jobs.
+    """Run assigned evaluation jobs on this machine.
 
     Args:
-        machine: Force machine identity ("A" or "B"). Auto-detects if None.
+        machine: Machine identity ("A" or "B"). Prompts interactively if not given.
         max_samples: Limit samples per benchmark (for testing).
         dry_run: Print jobs without running them.
     """
     if machine is None:
-        machine = detect_machine()
-        logger.info(f"Auto-detected: Machine {machine}")
+        machine = prompt_machine()
     else:
         machine = machine.upper()
-        logger.info(f"Forced: Machine {machine}")
+    logger.info(f"Machine: {machine}")
 
     if machine == "B":
         jobs = MACHINE_B_JOBS

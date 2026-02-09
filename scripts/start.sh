@@ -2,9 +2,9 @@
 # Launch evaluation in a persistent session that survives SSH disconnect.
 #
 # Usage:
-#   bash scripts/start.sh              # Auto-detect machine, run all jobs
-#   bash scripts/start.sh --machine B  # Force machine B
-#   bash scripts/start.sh --max_samples 10  # Quick test
+#   bash scripts/start.sh              # Asks which machine, run all jobs
+#   bash scripts/start.sh --machine B  # Skip prompt, force machine B
+#   bash scripts/start.sh --max_samples 10  # Quick test (still prompts for machine)
 #
 # The process will keep running after you disconnect SSH.
 # Check progress anytime with:
@@ -31,6 +31,37 @@ PID_FILE="$LOG_DIR/eval.pid"
 # Forward all arguments to run_machine.py
 ARGS="$@"
 
+# If --machine is not already in the arguments, ask interactively now
+# (the detached session can't prompt for input)
+if ! echo "$ARGS" | grep -q -- "--machine"; then
+    echo ""
+    echo "=== Which machine is this? ==="
+    echo ""
+    if command -v nvidia-smi &> /dev/null; then
+        echo "Detected GPUs:"
+        nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv,noheader 2>/dev/null | while read line; do
+            echo "  $line"
+        done
+        echo ""
+    fi
+    echo "  A) Machine A — 4x Titan X Pascal (compute 6.1)"
+    echo "     Runs: MMBench, POPE, TextVQA, ScienceQA (INT8, 2 parallel instances)"
+    echo ""
+    echo "  B) Machine B — 1x RTX 3090 (+ unusable Titan X Maxwell)"
+    echo "     Runs: GQA, MMMU (FP16, single GPU)"
+    echo ""
+    while true; do
+        read -p "  Enter A or B: " MACHINE_CHOICE
+        MACHINE_CHOICE=$(echo "$MACHINE_CHOICE" | tr '[:lower:]' '[:upper:]')
+        if [ "$MACHINE_CHOICE" = "A" ] || [ "$MACHINE_CHOICE" = "B" ]; then
+            break
+        fi
+        echo "  Please enter A or B."
+    done
+    ARGS="--machine $MACHINE_CHOICE $ARGS"
+fi
+
+echo ""
 echo "=== VisionEval Launcher ==="
 echo "Project: $PROJECT_DIR"
 echo "Log:     $LOG_FILE"
