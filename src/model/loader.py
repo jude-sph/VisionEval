@@ -1,7 +1,18 @@
 """Model loading wrapper for Cambrian-8B with multi-GPU and quantization support."""
 
+import logging
 import torch
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _flash_attn_available() -> bool:
+    try:
+        import flash_attn  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def load_cambrian(
@@ -41,6 +52,11 @@ def load_cambrian(
         kwargs["device_map"] = {"": gpu_ids[0]}
     else:
         kwargs["device_map"] = "auto"
+
+    # Fall back gracefully if flash-attn not installed
+    if use_flash_attn and not _flash_attn_available():
+        logger.warning("flash-attn not installed, falling back to default attention")
+        use_flash_attn = False
 
     device = f"cuda:{gpu_ids[0]}" if gpu_ids else "cuda"
 
