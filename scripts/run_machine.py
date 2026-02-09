@@ -26,27 +26,33 @@ MACHINE_B_JOBS = [
     ("gqa", "normal", "0", False),
     ("gqa", "no_image", "0", False),
     ("gqa", "wrong_image", "0", False),
+    ("gqa", "gaussian_noise", "0", False),
     ("mmmu", "normal", "0", False),
     ("mmmu", "no_image", "0", False),
     ("mmmu", "wrong_image", "0", False),
+    ("mmmu", "gaussian_noise", "0", False),
 ]
 
 MACHINE_A_INSTANCE_1 = [
     ("mmbench", "normal", "0,1", True),
     ("mmbench", "no_image", "0,1", True),
     ("mmbench", "wrong_image", "0,1", True),
+    ("mmbench", "gaussian_noise", "0,1", True),
     ("pope", "normal", "0,1", True),
     ("pope", "no_image", "0,1", True),
     ("pope", "wrong_image", "0,1", True),
+    ("pope", "gaussian_noise", "0,1", True),
 ]
 
 MACHINE_A_INSTANCE_2 = [
     ("textvqa", "normal", "2,3", True),
     ("textvqa", "no_image", "2,3", True),
     ("textvqa", "wrong_image", "2,3", True),
+    ("textvqa", "gaussian_noise", "2,3", True),
     ("scienceqa", "normal", "2,3", True),
     ("scienceqa", "no_image", "2,3", True),
     ("scienceqa", "wrong_image", "2,3", True),
+    ("scienceqa", "gaussian_noise", "2,3", True),
 ]
 
 
