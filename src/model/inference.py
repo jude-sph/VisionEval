@@ -94,7 +94,7 @@ def run_inference(
     # Generate
     with torch.inference_mode():
         output_ids = model.generate(
-            input_ids=input_ids,
+            input_ids,
             images=image_tensor,
             image_sizes=image_sizes,
             do_sample=temperature > 0,
