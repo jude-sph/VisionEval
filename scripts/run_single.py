@@ -55,6 +55,7 @@ def main(
         ],
     )
 
+    gpu_ids = str(gpu_ids)
     gpu_list = [int(x) for x in gpu_ids.split(",")]
 
     # Set CUDA_VISIBLE_DEVICES
