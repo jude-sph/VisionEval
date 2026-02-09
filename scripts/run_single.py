@@ -14,10 +14,6 @@ import fire
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("run_single")
 
 
@@ -45,6 +41,20 @@ def main(
         max_new_tokens: Max generation length.
         results_dir: Directory for results.
     """
+    # Set up logging to both console and per-job log file
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"{benchmark}_{condition}.log")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file),
+        ],
+    )
+
     gpu_list = [int(x) for x in gpu_ids.split(",")]
 
     # Set CUDA_VISIBLE_DEVICES

@@ -3,6 +3,9 @@ results/raw/
 results/aggregated/
 results/plots/
 
+# Logs
+logs/
+
 # Python
 __pycache__/
 *.py[cod]
