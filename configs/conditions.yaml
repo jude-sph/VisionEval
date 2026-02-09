@@ -14,11 +14,11 @@ wrong_image:
   description: "Random different image from same dataset"
   phase: 1
 
-# Phase 2: Stretch conditions
+# Phase 1 addition
 gaussian_noise:
   name: "Gaussian Noise"
   description: "Random RGB noise at same resolution"
-  phase: 2
+  phase: 1
 
 heavy_blur:
   name: "Heavy Blur"

@@ -30,18 +30,19 @@ EXPECTED_SAMPLES = {
 
 # All planned runs
 ALL_JOBS = [
-    ("mmmu", "normal"), ("mmmu", "no_image"), ("mmmu", "wrong_image"),
-    ("mmbench", "normal"), ("mmbench", "no_image"), ("mmbench", "wrong_image"),
-    ("scienceqa", "normal"), ("scienceqa", "no_image"), ("scienceqa", "wrong_image"),
-    ("pope", "normal"), ("pope", "no_image"), ("pope", "wrong_image"),
-    ("textvqa", "normal"), ("textvqa", "no_image"), ("textvqa", "wrong_image"),
-    ("gqa", "normal"), ("gqa", "no_image"), ("gqa", "wrong_image"),
+    ("mmmu", "normal"), ("mmmu", "no_image"), ("mmmu", "wrong_image"), ("mmmu", "gaussian_noise"),
+    ("mmbench", "normal"), ("mmbench", "no_image"), ("mmbench", "wrong_image"), ("mmbench", "gaussian_noise"),
+    ("scienceqa", "normal"), ("scienceqa", "no_image"), ("scienceqa", "wrong_image"), ("scienceqa", "gaussian_noise"),
+    ("pope", "normal"), ("pope", "no_image"), ("pope", "wrong_image"), ("pope", "gaussian_noise"),
+    ("textvqa", "normal"), ("textvqa", "no_image"), ("textvqa", "wrong_image"), ("textvqa", "gaussian_noise"),
+    ("gqa", "normal"), ("gqa", "no_image"), ("gqa", "wrong_image"), ("gqa", "gaussian_noise"),
 ]
 
 CONDITION_NAMES = {
     "normal": "Normal",
     "no_image": "No Image",
     "wrong_image": "Wrong Img",
+    "gaussian_noise": "Noise",
 }
 
 BENCHMARK_NAMES = {

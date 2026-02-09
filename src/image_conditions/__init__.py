@@ -4,11 +4,13 @@ from .base import ImageCondition
 from .normal import NormalCondition
 from .no_image import NoImageCondition
 from .wrong_image import WrongImageCondition
+from .gaussian_noise import GaussianNoiseCondition
 
 CONDITIONS = {
     "normal": NormalCondition,
     "no_image": NoImageCondition,
     "wrong_image": WrongImageCondition,
+    "gaussian_noise": GaussianNoiseCondition,
 }
 
 
