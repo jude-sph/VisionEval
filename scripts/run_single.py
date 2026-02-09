@@ -55,8 +55,12 @@ def main(
         ],
     )
 
-    gpu_ids = str(gpu_ids)
-    gpu_list = [int(x) for x in gpu_ids.split(",")]
+    # fire may parse gpu_ids as int (0), tuple (0,1), or str ("0,1")
+    if isinstance(gpu_ids, (list, tuple)):
+        gpu_list = [int(x) for x in gpu_ids]
+    else:
+        gpu_list = [int(x) for x in str(gpu_ids).split(",")]
+    gpu_ids = ",".join(str(g) for g in gpu_list)
 
     # Set CUDA_VISIBLE_DEVICES
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids
