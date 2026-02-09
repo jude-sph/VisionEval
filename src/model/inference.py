@@ -1,5 +1,6 @@
 """Inference wrapper for Cambrian model: handles both image and no-image paths."""
 
+import re
 import torch
 from PIL import Image
 from typing import Optional
@@ -7,6 +8,11 @@ from typing import Optional
 from cambrian.mm_utils import process_images, tokenizer_image_token
 from cambrian.conversation import conv_templates
 from cambrian.constants import IMAGE_TOKEN_INDEX
+
+
+def _clean_dataset_image_refs(text: str) -> str:
+    """Strip dataset-level image references like <image 1>, <image 2>, etc."""
+    return re.sub(r"<image\s+\d+>", "", text)
 
 
 def build_prompt(question: str, conv_mode: str = "llama_3", include_image: bool = True) -> str:
@@ -21,6 +27,9 @@ def build_prompt(question: str, conv_mode: str = "llama_3", include_image: bool 
         Formatted prompt string.
     """
     conv = conv_templates[conv_mode].copy()
+
+    # Strip dataset-level image placeholders (e.g. MMMU's <image 1>)
+    question = _clean_dataset_image_refs(question)
 
     # Ensure image tokens are present if needed
     if include_image and "<image>" not in question:
@@ -103,7 +112,11 @@ def run_inference(
             use_cache=True,
         )
 
-    # Decode — skip input tokens to get only the generated response
-    generated_ids = output_ids[:, input_ids.shape[1]:]
+    # Decode — Cambrian's generate() may return only new tokens (when it
+    # passes inputs_embeds internally) or full sequence (input + generated).
+    if output_ids.shape[1] > input_ids.shape[1]:
+        generated_ids = output_ids[:, input_ids.shape[1]:]
+    else:
+        generated_ids = output_ids
     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     return response
