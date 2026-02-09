@@ -1,0 +1,54 @@
+mmmu:
+  name: "MMMU"
+  dataset: "MMMU/MMMU"
+  split: "validation"
+  max_samples: null  # ~900 total
+  scoring: "mc_accuracy"
+  language_prior: "high"
+  random_chance: 0.25  # 4-choice MCQ
+
+mmbench:
+  name: "MMBench"
+  dataset: "opencompass/MMBench"
+  split: "dev"
+  max_samples: null  # ~3000 total
+  scoring: "mc_accuracy"
+  language_prior: "high"
+  random_chance: 0.25
+
+scienceqa:
+  name: "ScienceQA-Image"
+  dataset: "derek-thomas/ScienceQA"
+  split: "test"
+  filter_has_image: true
+  max_samples: null  # ~2000 with images
+  scoring: "mc_accuracy"
+  language_prior: "high"
+  random_chance: 0.25
+
+pope:
+  name: "POPE"
+  dataset: "lmms-lab/POPE"
+  split: "test"
+  max_samples: 3000
+  scoring: "binary_accuracy_f1"
+  language_prior: "low"
+  random_chance: 0.50  # binary yes/no
+
+textvqa:
+  name: "TextVQA"
+  dataset: "textvqa"
+  split: "validation"
+  max_samples: 3000
+  scoring: "vqa_accuracy"
+  language_prior: "low"
+  random_chance: 0.0
+
+gqa:
+  name: "GQA"
+  dataset: "lmms-lab/GQA"
+  split: "testdev_balanced"
+  max_samples: 5000
+  scoring: "exact_match"
+  language_prior: "low"
+  random_chance: 0.0

@@ -1,0 +1,33 @@
+# Phase 1: Core conditions
+normal:
+  name: "Normal"
+  description: "Baseline — correct image"
+  phase: 1
+
+no_image:
+  name: "No Image"
+  description: "Image removed, text-only inference"
+  phase: 1
+
+wrong_image:
+  name: "Wrong Image"
+  description: "Random different image from same dataset"
+  phase: 1
+
+# Phase 2: Stretch conditions
+gaussian_noise:
+  name: "Gaussian Noise"
+  description: "Random RGB noise at same resolution"
+  phase: 2
+
+heavy_blur:
+  name: "Heavy Blur"
+  description: "Gaussian blur, radius=50"
+  phase: 2
+  blur_radius: 50
+
+shuffled_patches:
+  name: "Shuffled Patches"
+  description: "8x8 grid patches randomly rearranged"
+  phase: 2
+  grid_size: 8
