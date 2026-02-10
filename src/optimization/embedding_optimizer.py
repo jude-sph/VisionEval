@@ -159,7 +159,7 @@ def optimize_per_question(
             from src.model.inference import run_inference
             from PIL import Image
             dummy_image = Image.new("RGB", (384, 384), color=(128, 128, 128))
-            response = run_inference(
+            inference_result = run_inference(
                 model=model,
                 tokenizer=tokenizer,
                 image_processor=image_processor,
@@ -168,6 +168,7 @@ def optimize_per_question(
                 conv_mode=conv_mode,
                 max_new_tokens=32,
             )
+            response = inference_result["response"]
 
         prediction = benchmark.extract_answer(response, sample)
         correct = benchmark.score(prediction, sample)
