@@ -63,11 +63,10 @@ def load_cambrian(
         logger.warning("flash-attn not installed, falling back to default attention")
         use_flash_attn = False
 
-    # For multi-GPU: pass device="cuda" so Cambrian's builder doesn't
-    # override device_map (it checks `if device != "cuda"`)
-    if gpu_ids is not None and len(gpu_ids) > 1:
-        device = "cuda"
-    elif gpu_ids is not None and len(gpu_ids) == 1:
+    # Pass device="cuda" so Cambrian's builder uses device_map instead of
+    # calling model.to(device). This is required for bitsandbytes quantized
+    # models which can't be .to(device), and for multi-GPU device_map.
+    if gpu_ids is not None and len(gpu_ids) == 1 and not load_8bit:
         device = f"cuda:{gpu_ids[0]}"
     else:
         device = "cuda"
