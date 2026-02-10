@@ -10,9 +10,18 @@ logger = logging.getLogger(__name__)
 def _flash_attn_available() -> bool:
     try:
         import flash_attn  # noqa: F401
-        return True
     except ImportError:
         return False
+    # Flash Attention 2 requires compute capability >= 8.0 (Ampere+).
+    # It may be installed but will crash on Pascal (6.1) or older GPUs.
+    if torch.cuda.is_available():
+        cap = torch.cuda.get_device_capability()
+        if cap[0] < 8:
+            logger.info(
+                f"flash-attn installed but GPU compute {cap[0]}.{cap[1]} < 8.0; disabling"
+            )
+            return False
+    return True
 
 
 def load_cambrian(
