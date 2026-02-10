@@ -79,20 +79,16 @@ def optimize_per_question(
     # Discover encoder output shapes from a dummy forward pass
     shapes = get_encoder_output_shapes(model, image_processor)
 
-    # Memory optimization: only needed on single GPU (tight 24GB).
-    # On multi-GPU (e.g., 4x12GB = 48GB) we have ample headroom.
-    if not multi_gpu:
-        # Free vision encoder memory — encode_images is patched so they're unused.
-        # This saves ~3.8GB VRAM, critical for fitting backprop in 24GB FP16.
-        # Access via model.model (CambrianLlamaModel) which holds vision_tower_aux_list.
-        inner = getattr(model, "model", model)
-        towers = getattr(inner, "vision_tower_aux_list", None)
-        if towers:
-            for tower in towers:
-                tower.cpu()
-            torch.cuda.empty_cache()
-            freed_mb = torch.cuda.mem_get_info()[0] / 1024**2
-            logger.info(f"Moved {len(towers)} vision encoders to CPU ({freed_mb:.0f}MB now free)")
+    # Free vision encoder memory — encode_images is patched so they're unused.
+    # Cambrian's builder loads all 4 towers onto GPU 0 regardless of device_map,
+    # so this is needed on multi-GPU too (saves ~3.8GB on GPU 0).
+    inner = getattr(model, "model", model)
+    towers = getattr(inner, "vision_tower_aux_list", None)
+    if towers:
+        for tower in towers:
+            tower.cpu()
+        torch.cuda.empty_cache()
+        logger.info(f"Moved {len(towers)} vision encoders to CPU")
 
     # Enable gradient checkpointing to save memory during backward pass.
     # Cambrian checks `self.gradient_checkpointing and self.training`, so we
