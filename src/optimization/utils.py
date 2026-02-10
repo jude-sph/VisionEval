@@ -58,10 +58,11 @@ def get_encoder_output_shapes(
         image_processor=image_processor,
         model_cfg=model.config,
     )
+    # Always use float16 — encoder inputs expect float16 regardless of INT8 quantization
     if isinstance(image_tensor, list):
-        image_tensor = [t.to(dtype=model.dtype, device=device) for t in image_tensor]
+        image_tensor = [t.to(dtype=torch.float16, device=device) for t in image_tensor]
     else:
-        image_tensor = [image_tensor.to(dtype=model.dtype, device=device)]
+        image_tensor = [image_tensor.to(dtype=torch.float16, device=device)]
 
     with torch.no_grad():
         features = model.encode_images(image_tensor)

@@ -42,6 +42,9 @@ class GQABenchmark(Benchmark):
 
         self._instructions = instructions_ds
         self._image_lookup = image_lookup
+        # Map image IDs to positions in get_raw_dataset() list
+        # so _index in metadata correctly identifies the image for wrong_image condition
+        self._image_id_to_pos = {img_id: i for i, img_id in enumerate(image_lookup.keys())}
         logger.info(
             f"GQA loaded: {len(instructions_ds)} questions (with images), "
             f"{len(image_lookup)} unique images"
@@ -64,7 +67,7 @@ class GQABenchmark(Benchmark):
                 question=row.get("question", ""),
                 image=image.convert("RGB"),
                 ground_truth=row.get("answer", "").lower().strip(),
-                metadata={"_index": idx},
+                metadata={"_index": self._image_id_to_pos.get(image_id, idx)},
             )
 
     def get_raw_dataset(self):

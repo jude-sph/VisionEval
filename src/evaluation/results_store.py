@@ -75,18 +75,25 @@ class ResultsStore:
 
     def list_completed_runs(self) -> list[tuple[str, str]]:
         """List all (benchmark, condition) pairs that have results."""
+        # Known conditions (longest first so "gaussian_noise" matches before "noise")
+        known_conditions = sorted(
+            ["normal", "no_image", "wrong_image", "gaussian_noise",
+             "heavy_blur", "shuffled_patches", "optimized_noise"],
+            key=len, reverse=True,
+        )
         runs = []
         for path in sorted(self.raw_dir.glob("*.jsonl")):
-            parts = path.stem.rsplit("_", 1)
-            if len(parts) == 2:
-                runs.append((parts[0], parts[1]))
-            else:
-                # Handle multi-word condition names like "no_image"
-                # Try splitting at known condition names
-                stem = path.stem
-                for cond in ["normal", "no_image", "wrong_image", "gaussian_noise", "heavy_blur", "shuffled_patches"]:
-                    if stem.endswith(f"_{cond}"):
-                        bench = stem[: -(len(cond) + 1)]
-                        runs.append((bench, cond))
-                        break
+            stem = path.stem
+            matched = False
+            for cond in known_conditions:
+                if stem.endswith(f"_{cond}"):
+                    bench = stem[: -(len(cond) + 1)]
+                    runs.append((bench, cond))
+                    matched = True
+                    break
+            if not matched:
+                # Fallback: split on last underscore
+                parts = stem.rsplit("_", 1)
+                if len(parts) == 2:
+                    runs.append((parts[0], parts[1]))
         return runs
