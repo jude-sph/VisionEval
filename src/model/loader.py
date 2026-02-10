@@ -30,7 +30,7 @@ def load_cambrian(
     gpu_ids: Optional[list[int]] = None,
     load_8bit: bool = False,
     use_flash_attn: bool = True,
-    gpu0_max_memory: str = "7GiB",
+    gpu0_max_memory: str = "7GiB",  # Not effective with Cambrian builder; kept for future use
 ):
     """Load Cambrian model with appropriate device placement.
 
