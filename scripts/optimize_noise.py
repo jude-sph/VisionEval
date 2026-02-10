@@ -48,6 +48,7 @@ def main(
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
+    resume: bool = False,
 ):
     """Run noise optimization on a benchmark.
 
@@ -73,6 +74,7 @@ def main(
         model_path: HuggingFace model path.
         conv_mode: Conversation template.
         results_dir: Directory for optimization results.
+        resume: Resume universal optimization from saved checkpoint tensors.
     """
     log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -156,6 +158,7 @@ def main(
                 lr=lr,
                 conv_mode=conv_mode,
                 results_dir=results_dir,
+                resume=resume,
             )
             logger.info(f"Embedding universal results: {universal_summary}")
 

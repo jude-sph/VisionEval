@@ -108,6 +108,7 @@ def optimize_universal(
     lr: float = 0.001,
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
+    resume: bool = False,
 ) -> dict:
     """Optimize ONE set of embeddings across all questions.
 
@@ -120,10 +121,11 @@ def optimize_universal(
         image_processor: Image processor (used to discover encoder output shapes).
         benchmark: Loaded benchmark instance.
         max_samples: Number of questions to train on.
-        num_epochs: Number of full passes through all questions.
+        num_epochs: Total number of epochs (including already-completed ones).
         lr: Adam learning rate.
         conv_mode: Conversation template.
         results_dir: Where to save results.
+        resume: If True, load saved tensors and epoch log, continue training.
 
     Returns:
         Summary dict with accuracy metrics.
@@ -139,27 +141,74 @@ def optimize_universal(
     tensors_dir = os.path.join(results_dir, "tensors")
     os.makedirs(tensors_dir, exist_ok=True)
 
-    # One set of features for ALL questions
-    features = _init_features(shapes, device, dtype)
-    optimizer = torch.optim.Adam(features, lr=lr)
-
-    # Save initial (random) embeddings for comparison
-    torch.save(
-        [f.detach().cpu() for f in features],
-        os.path.join(tensors_dir, f"{benchmark.name}_universal_initial.pt"),
-    )
-
-    results_file = os.path.join(results_dir, f"{benchmark.name}_universal_embeddings.jsonl")
     epoch_log_file = os.path.join(results_dir, f"{benchmark.name}_universal_epochs.jsonl")
-    run_start = time.time()
-
-    logger.info(f"Starting UNIVERSAL optimization: {total} questions, {num_epochs} epochs, lr={lr}")
-    logger.info(f"Results file: {results_file}")
-
+    start_epoch = 0
     epoch_losses = []
     epoch_accuracies = []
 
-    for epoch in range(num_epochs):
+    if resume:
+        # Find the latest checkpoint tensor
+        best_checkpoint = None
+        best_epoch = 0
+        for f_name in sorted(os.listdir(tensors_dir)):
+            if f_name.startswith(f"{benchmark.name}_universal_epoch") and f_name.endswith(".pt"):
+                ep = int(f_name.replace(f"{benchmark.name}_universal_epoch", "").replace(".pt", ""))
+                if ep > best_epoch:
+                    best_epoch = ep
+                    best_checkpoint = os.path.join(tensors_dir, f_name)
+
+        if best_checkpoint and best_epoch > 0:
+            saved_tensors = torch.load(best_checkpoint, map_location=device, weights_only=True)
+            features = []
+            for t in saved_tensors:
+                t = t.to(device=device, dtype=dtype)
+                t.requires_grad_(True)
+                features.append(t)
+            start_epoch = best_epoch
+            logger.info(f"Resumed from {best_checkpoint} (epoch {best_epoch})")
+
+            # Reload epoch log to restore loss/accuracy curves
+            if os.path.exists(epoch_log_file):
+                with open(epoch_log_file) as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                entry = json.loads(line)
+                                if entry["epoch"] <= best_epoch:
+                                    epoch_losses.append(entry["avg_loss"])
+                                    epoch_accuracies.append(entry["accuracy"])
+                            except (json.JSONDecodeError, KeyError):
+                                pass
+                logger.info(f"Restored {len(epoch_losses)} epoch log entries")
+        else:
+            logger.warning("No checkpoint found, starting from scratch")
+            resume = False
+
+    if not resume:
+        # One set of features for ALL questions
+        features = _init_features(shapes, device, dtype)
+
+        # Save initial (random) embeddings for comparison
+        torch.save(
+            [f.detach().cpu() for f in features],
+            os.path.join(tensors_dir, f"{benchmark.name}_universal_initial.pt"),
+        )
+
+    optimizer = torch.optim.Adam(features, lr=lr)
+
+    results_file = os.path.join(results_dir, f"{benchmark.name}_universal_embeddings.jsonl")
+    run_start = time.time()
+
+    if start_epoch >= num_epochs:
+        logger.info(f"Already completed {start_epoch} epochs (requested {num_epochs}), skipping training")
+    else:
+        logger.info(
+            f"Starting UNIVERSAL optimization: {total} questions, "
+            f"epochs {start_epoch + 1}-{num_epochs}, lr={lr}"
+        )
+    logger.info(f"Results file: {results_file}")
+
+    for epoch in range(start_epoch, num_epochs):
         epoch_start = time.time()
         optimizer.zero_grad()
         epoch_loss = 0
