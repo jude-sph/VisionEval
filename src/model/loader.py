@@ -45,7 +45,10 @@ def load_cambrian(
         # accelerate will split layers across specified GPUs
         kwargs["device_map"] = "auto"
         # Restrict to specified GPUs
+        # First GPU holds vision encoders (~3.8GB FP16) loaded separately by
+        # Cambrian, so give it less headroom for LLM layers
         max_memory = {i: "11GiB" for i in gpu_ids}
+        max_memory[gpu_ids[0]] = "7GiB"
         max_memory["cpu"] = "16GiB"
         kwargs["max_memory"] = max_memory
     elif gpu_ids is not None and len(gpu_ids) == 1:
