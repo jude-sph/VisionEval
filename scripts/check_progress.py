@@ -227,6 +227,84 @@ def print_progress(results_dir: str = "results"):
         max_eta = max(r[3] for r in active_runs)
         print(f"\n  Longest active ETA: {format_duration(max_eta)}")
 
+    # Noise optimization section
+    opt_dir = Path(results_dir) / "optimization"
+    opt_files = sorted(opt_dir.glob("*_optimized_embeddings.jsonl")) if opt_dir.exists() else []
+
+    if opt_files:
+        print()
+        print(f"  {'Noise Optimization':}")
+        opt_header = f"  {'Benchmark':<12} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'Avg/q':>8} {'Updated':>12}"
+        print(opt_header)
+        print("  " + "-" * (len(opt_header) - 2))
+
+        for opt_path in opt_files:
+            bench_name = opt_path.stem.replace("_optimized_embeddings", "")
+            bench_display = BENCHMARK_NAMES.get(bench_name, bench_name)
+
+            done = 0
+            correct = 0
+            total_loss_init = 0
+            total_loss_final = 0
+            total_time = 0
+            expected = 50  # default
+
+            with open(opt_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        r = json.loads(line)
+                        done += 1
+                        if r.get("correct"):
+                            correct += 1
+                        total_loss_init += r.get("initial_loss", 0)
+                        total_loss_final += r.get("final_loss", 0)
+                        total_time += r.get("optimization_time_s", 0)
+                    except json.JSONDecodeError:
+                        continue
+
+            # Check summary file for expected count
+            summary_path = opt_dir / f"{bench_name}_optimized_summary.json"
+            if summary_path.exists():
+                try:
+                    with open(summary_path) as f:
+                        summary = json.loads(f.read())
+                    expected = summary.get("num_samples", expected)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+            last_update = datetime.fromtimestamp(opt_path.stat().st_mtime) if done > 0 else None
+
+            acc = (correct / done * 100) if done > 0 else 0
+            avg_loss = (total_loss_final / done) if done > 0 else 0
+            avg_drop = ((total_loss_init - total_loss_final) / done) if done > 0 else 0
+            avg_time = (total_time / done) if done > 0 else 0
+
+            if done >= expected and expected > 0:
+                status = "\033[92m DONE \033[0m"
+            elif done > 0:
+                status = "\033[93m >>>  \033[0m"
+            else:
+                status = "      "
+
+            print(
+                f"{status} {bench_display:<12} "
+                f"{done:>4}/{expected:<4} "
+                f"{acc:>6.1f}% "
+                f"{avg_loss:>9.3f} "
+                f"{avg_drop:>+9.3f} "
+                f"{avg_time:>7.1f}s "
+                f"{format_time_ago(last_update):>12}"
+            )
+
+        print("  " + "-" * (len(opt_header) - 2))
+
+    # ETA for active runs
+    if active_runs:
+        max_eta = max(r[3] for r in active_runs)
+        print(f"\n  Longest active ETA: {format_duration(max_eta)}")
+
     # Log file hint
     log_file = logs_dir / "eval.log"
     if log_file.exists():
