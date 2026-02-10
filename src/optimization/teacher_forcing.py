@@ -18,22 +18,29 @@ def compute_teacher_forcing_loss(
     answer: str,
     image_sizes: list[tuple[int, int]] | None = None,
     conv_mode: str = "llama_3",
+    images: list[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute cross-entropy loss for the correct answer via teacher forcing.
 
-    The model's encode_images should be patched (via encode_images_hook)
-    before calling this function, so it returns the optimizable features.
+    For embedding-space optimization: encode_images should be patched (via
+    encode_images_hook) before calling, and images can be left as None.
+
+    For pixel-space optimization: pass preprocessed image tensors via the
+    images parameter (list of 4 tensors from differentiable_preprocess).
 
     We build the full prompt + answer, create labels that mask the prompt
     tokens (-100), and call model.forward() to get the loss on answer tokens.
 
     Args:
-        model: Cambrian model (with encode_images already patched).
+        model: Cambrian model.
         tokenizer: Tokenizer.
         question: Formatted question string.
         answer: Ground truth answer text (e.g., "A", "yes", "blue sky").
         image_sizes: List of (width, height) tuples for the images.
         conv_mode: Conversation template name.
+        images: Optional list of preprocessed image tensors (for pixel-space
+            optimization). If None, uses dummy images (for embedding-space
+            optimization where encode_images is patched).
 
     Returns:
         Scalar loss tensor (differentiable).
@@ -69,24 +76,26 @@ def compute_teacher_forcing_loss(
     prompt_len = len(prompt_ids)
     labels[0, :prompt_len] = -100  # mask prompt tokens
 
-    # We need dummy image inputs to trigger prepare_inputs_labels_for_multimodal.
-    # The actual features come from the patched encode_images (via encode_images_hook).
-    # Format: list of per-encoder tensors, matching what process_images() returns.
-    # Content doesn't matter since encode_images is patched.
-    num_encoders = 4  # SigLIP, CLIP, DINOv2, ConvNeXt
-    dummy_images = [
-        torch.zeros(1, 3, 384, 384, device=device, dtype=model.dtype)
-        for _ in range(num_encoders)
-    ]
+    # Image tensors for the forward pass.
+    # For pixel-space optimization: use the provided preprocessed tensors.
+    # For embedding-space optimization: use dummy tensors (encode_images is patched).
+    if images is not None:
+        forward_images = images
+    else:
+        num_encoders = 4  # SigLIP, CLIP, DINOv2, ConvNeXt
+        forward_images = [
+            torch.zeros(1, 3, 384, 384, device=device, dtype=model.dtype)
+            for _ in range(num_encoders)
+        ]
     if image_sizes is None:
         image_sizes = [(384, 384)]
 
     # Forward pass — model.forward() calls prepare_inputs_labels_for_multimodal
-    # which calls encode_images (our patched version), then computes loss.
+    # which calls encode_images, then computes loss.
     output = model.forward(
         input_ids=full_ids,
         labels=labels,
-        images=dummy_images,
+        images=forward_images,
         image_sizes=image_sizes,
     )
 
