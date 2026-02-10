@@ -19,6 +19,7 @@ build/
 
 # Virtual environments
 .venv/
+.analysis_venv/
 venv/
 env/
 
