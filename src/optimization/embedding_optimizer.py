@@ -67,7 +67,9 @@ def optimize_per_question(
     """
     os.makedirs(results_dir, exist_ok=True)
     device = next(model.parameters()).device
-    dtype = model.dtype
+    # Always use float16 for feature tensors — projectors expect float16
+    # regardless of whether model weights are INT8 quantized
+    dtype = torch.float16
 
     # Discover encoder output shapes from a dummy forward pass
     shapes = get_encoder_output_shapes(model, image_processor)
