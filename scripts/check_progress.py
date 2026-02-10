@@ -69,7 +69,7 @@ def count_lines(path: Path) -> int:
 def get_run_stats(jsonl_path: Path) -> dict:
     """Get statistics from a JSONL results file."""
     if not jsonl_path.exists():
-        return {"done": 0, "correct": 0, "errors": 0, "avg_ms": 0, "last_update": None}
+        return {"done": 0, "correct": 0, "errors": 0, "valid": 0, "avg_ms": 0, "last_update": None}
 
     done = 0
     correct = 0
