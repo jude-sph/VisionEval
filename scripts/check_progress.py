@@ -109,15 +109,25 @@ def get_run_stats(jsonl_path: Path) -> dict:
     }
 
 
-def format_duration(seconds: float) -> str:
-    """Format seconds into human-readable duration."""
+def format_duration(seconds: float, precise: bool = False) -> str:
+    """Format seconds into human-readable duration.
+
+    Args:
+        seconds: Duration in seconds.
+        precise: If True, always include seconds component.
+    """
     if seconds <= 0:
         return "-"
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
     if hours > 0:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
+        if precise:
+            return f"{hours}h {minutes:02d}m {secs:02d}s"
+        return f"{hours}h {minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
 
 
 def format_time_ago(dt: datetime | None) -> str:
@@ -174,8 +184,31 @@ def print_progress(results_dir: str = "results"):
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
+    # --- Read all stats once (avoid re-reading files 3+ times per job) ---
+    all_stats = {}  # (benchmark, condition) -> stats dict
+    for benchmark, condition in ALL_JOBS:
+        jsonl_path = raw_dir / f"{benchmark}_{condition}.jsonl"
+        all_stats[(benchmark, condition)] = get_run_stats(jsonl_path)
+
+    # --- Compute per-benchmark avg time (weighted across all conditions with data) ---
+    bench_avg_s = {}  # benchmark -> avg seconds per question
+    for benchmark in EXPECTED_SAMPLES:
+        total_valid = 0
+        total_time_ms = 0
+        for b, c in ALL_JOBS:
+            if b == benchmark:
+                s = all_stats[(b, c)]
+                if s["valid"] > 0 and s["avg_ms"] > 0:
+                    total_valid += s["valid"]
+                    total_time_ms += s["avg_ms"] * s["valid"]
+        if total_valid > 0:
+            bench_avg_s[benchmark] = (total_time_ms / total_valid) / 1000
+
+    # Global average fallback (for benchmarks with no data at all)
+    all_avg_s = sum(bench_avg_s.values()) / len(bench_avg_s) if bench_avg_s else 0
+
     # Header
-    header = f"  {'Benchmark':<12} {'Condition':<12} {'Progress':>14} {'%':>6} {'Acc':>7} {'Avg/q':>8} {'ETA':>8} {'Updated':>12}"
+    header = f"  {'Benchmark':<12} {'Condition':<12} {'Progress':>14} {'%':>6} {'Acc':>7} {'Avg/q':>8} {'ETA':>10} {'Updated':>12}"
     print(header)
     print("  " + "-" * (len(header) - 2))
 
@@ -183,19 +216,26 @@ def print_progress(results_dir: str = "results"):
     total_expected = 0
     total_correct = 0
     total_valid = 0
-    active_runs = []
+    active_run = None  # Track the currently active (in-progress) job
+    earliest_update = None  # Track when the run started (first file modified)
 
     for benchmark, condition in ALL_JOBS:
-        jsonl_path = raw_dir / f"{benchmark}_{condition}.jsonl"
         expected = EXPECTED_SAMPLES.get(benchmark, 0)
         total_expected += expected
 
-        stats = get_run_stats(jsonl_path)
+        stats = all_stats[(benchmark, condition)]
         done = stats["done"]
         valid = stats["valid"]
         total_done += done
         total_correct += stats["correct"]
         total_valid += valid
+
+        # Track earliest file modification for elapsed time
+        if stats["last_update"] is not None:
+            if earliest_update is None:
+                earliest_update = stats["last_update"]
+            else:
+                earliest_update = min(earliest_update, stats["last_update"])
 
         # Calculate progress
         pct = (done / expected * 100) if expected > 0 else 0
@@ -207,9 +247,9 @@ def print_progress(results_dir: str = "results"):
         # Status indicator
         if done >= expected and expected > 0:
             status = "\033[92m DONE \033[0m"  # Green
-        elif done > 0:
+        elif done > 0 and done < expected:
             status = "\033[93m >>>  \033[0m"  # Yellow (in progress)
-            active_runs.append((benchmark, condition, pct, eta_s))
+            active_run = (benchmark, condition, done, expected, avg_s, eta_s)
         else:
             status = "      "  # Not started
 
@@ -223,7 +263,7 @@ def print_progress(results_dir: str = "results"):
         print(
             f"{status} {bench_display:<12} {cond_display:<12} "
             f"{progress_str:>14} {pct:>5.1f}% {acc:>6.1f}% "
-            f"{avg_str:>8} {eta_str:>8} {updated_str:>12}"
+            f"{avg_str:>8} {eta_str:>10} {updated_str:>12}"
         )
 
     print("  " + "-" * (len(header) - 2))
@@ -233,82 +273,85 @@ def print_progress(results_dir: str = "results"):
     overall_acc = (total_correct / total_valid * 100) if total_valid > 0 else 0
     print(f"  {'TOTAL':<12} {'':12} {total_done:>5}/{total_expected:<5} {overall_pct:>5.1f}% {overall_acc:>6.1f}%")
 
-    # --- Per-benchmark ETAs ---
-    # Collect avg time per question for each benchmark (from any condition with data)
-    bench_avg_s = {}  # benchmark -> avg seconds per question
-    for benchmark, condition in ALL_JOBS:
-        jsonl_path = raw_dir / f"{benchmark}_{condition}.jsonl"
-        stats = get_run_stats(jsonl_path)
-        if stats["valid"] > 0 and stats["avg_ms"] > 0:
-            # Keep the first observed average per benchmark (from most-completed condition)
-            if benchmark not in bench_avg_s:
-                bench_avg_s[benchmark] = stats["avg_ms"] / 1000
-
-    # Global average fallback (for benchmarks with no data at all)
-    all_avg_s = sum(bench_avg_s.values()) / len(bench_avg_s) if bench_avg_s else 0
-
+    # --- Per-benchmark ETAs (using cached stats) ---
     # Compute per-benchmark and total remaining time
-    # Jobs run sequentially, so total ETA = sum of all remaining job times
     total_remaining_s = 0
     bench_remaining = {}  # benchmark -> remaining seconds
+    bench_done_counts = {}  # benchmark -> (done, total_expected, conditions_done, conditions_total)
 
-    for benchmark, condition in ALL_JOBS:
-        jsonl_path = raw_dir / f"{benchmark}_{condition}.jsonl"
-        expected = EXPECTED_SAMPLES.get(benchmark, 0)
-        stats = get_run_stats(jsonl_path)
-        done = stats["done"]
-        remaining_questions = max(0, expected - done)
+    for benchmark in EXPECTED_SAMPLES:
+        expected = EXPECTED_SAMPLES[benchmark]
+        conds_done = 0
+        conds_total = 0
+        b_done = 0
 
-        if remaining_questions == 0:
-            job_eta_s = 0
-        else:
-            avg_s = bench_avg_s.get(benchmark, all_avg_s)
-            job_eta_s = remaining_questions * avg_s
+        for b, c in ALL_JOBS:
+            if b == benchmark:
+                conds_total += 1
+                s = all_stats[(b, c)]
+                b_done += s["done"]
+                if s["done"] >= expected:
+                    conds_done += 1
 
-        total_remaining_s += job_eta_s
-        bench_remaining[benchmark] = bench_remaining.get(benchmark, 0) + job_eta_s
+                remaining_q = max(0, expected - s["done"])
+                if remaining_q == 0:
+                    job_eta = 0
+                else:
+                    avg = bench_avg_s.get(benchmark, all_avg_s)
+                    job_eta = remaining_q * avg
+
+                total_remaining_s += job_eta
+                bench_remaining[benchmark] = bench_remaining.get(benchmark, 0) + job_eta
+
+        bench_done_counts[benchmark] = (b_done, expected * conds_total, conds_done, conds_total)
 
     # Print per-benchmark ETAs
     print()
     print(f"  {'Benchmark ETAs':}")
     for benchmark in EXPECTED_SAMPLES:
         bench_display = BENCHMARK_NAMES.get(benchmark, benchmark)
-        expected = EXPECTED_SAMPLES[benchmark]
-        # Count conditions done/total for this benchmark
-        conditions_done = 0
-        conditions_total = 0
-        bench_done = 0
-        for b, c in ALL_JOBS:
-            if b == benchmark:
-                conditions_total += 1
-                jsonl_path = raw_dir / f"{b}_{c}.jsonl"
-                stats = get_run_stats(jsonl_path)
-                bench_done += stats["done"]
-                if stats["done"] >= expected:
-                    conditions_done += 1
-
-        bench_expected = expected * conditions_total
-        bench_pct = bench_done / bench_expected * 100 if bench_expected > 0 else 0
+        b_done, b_expected, conds_done, conds_total = bench_done_counts[benchmark]
+        bench_pct = b_done / b_expected * 100 if b_expected > 0 else 0
         remaining_s = bench_remaining.get(benchmark, 0)
 
         # Progress bar (20 chars wide)
         bar_width = 20
         filled = int(bar_width * bench_pct / 100)
-        bar = "=" * filled + ">" * (1 if filled < bar_width else 0) + " " * (bar_width - filled - 1)
+        bar = "=" * filled + (">" if filled < bar_width else "") + " " * max(0, bar_width - filled - 1)
+
+        avg_str = ""
+        if benchmark in bench_avg_s:
+            avg_str = f"  ({bench_avg_s[benchmark]:.1f}s/q)"
 
         if remaining_s > 0:
             eta_str = format_duration(remaining_s)
-            print(f"  {bench_display:<12} [{bar}] {conditions_done}/{conditions_total} conditions   ~{eta_str} remaining")
+            print(f"  {bench_display:<12} [{bar}] {conds_done}/{conds_total} conditions   ~{eta_str} remaining{avg_str}")
         else:
-            if conditions_done == conditions_total:
-                print(f"  {bench_display:<12} [{'=' * bar_width}] {conditions_done}/{conditions_total} conditions   done")
+            if conds_done == conds_total:
+                print(f"  {bench_display:<12} [{'=' * bar_width}] {conds_done}/{conds_total} conditions   done")
             else:
-                print(f"  {bench_display:<12} [{bar}] {conditions_done}/{conditions_total} conditions   estimating...")
+                print(f"  {bench_display:<12} [{bar}] {conds_done}/{conds_total} conditions   estimating...")
+
+    # Active run callout
+    if active_run and running:
+        a_bench, a_cond, a_done, a_expected, a_avg, a_eta = active_run
+        a_bench_display = BENCHMARK_NAMES.get(a_bench, a_bench)
+        a_cond_display = CONDITION_NAMES.get(a_cond, a_cond)
+        print(f"\n  Currently running:  {a_bench_display}/{a_cond_display}  ({a_done}/{a_expected}, ~{format_duration(a_eta)} left)")
+
+    # Elapsed time
+    if earliest_update and total_done > 0:
+        # Approximate start time from earliest file mod and avg speed
+        # Better: just show wall time since first result was written
+        elapsed = (datetime.now() - earliest_update).total_seconds()
+        if elapsed > 0:
+            rate = total_done / elapsed
+            print(f"  Elapsed since first result:  {format_duration(elapsed)}  ({rate:.1f} q/s)")
 
     # Total system ETA
     if total_remaining_s > 0:
         completion_time = datetime.now() + timedelta(seconds=total_remaining_s)
-        print(f"\n  Total estimated remaining:  {format_duration(total_remaining_s)}")
+        print(f"\n  Total estimated remaining:  {format_duration(total_remaining_s, precise=True)}")
         print(f"  Estimated completion:       {completion_time.strftime('%Y-%m-%d %H:%M')}")
     elif total_done > 0 and total_done >= total_expected:
         print(f"\n  All benchmark evaluations complete!")
