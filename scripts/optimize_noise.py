@@ -4,14 +4,17 @@ Finds embedding-space inputs that maximize P(correct answer) for Cambrian-8B,
 without using any real images.
 
 Usage:
-    # 4x Titan X Pascal (default — dedicated noise optimization machine)
+    # Both modes (universal first, then per-question) — default
     python scripts/optimize_noise.py --benchmark mmmu --max_samples 50
 
-    # Single GPU (e.g., 3090 — tight, may need gradient checkpointing)
-    python scripts/optimize_noise.py --benchmark mmmu --gpu_ids 0 --max_samples 1
+    # Universal only
+    python scripts/optimize_noise.py --mode universal --num_epochs 10
+
+    # Per-question only
+    python scripts/optimize_noise.py --mode per_question --num_steps 20
 
     # Smoke test
-    python scripts/optimize_noise.py --benchmark mmmu --max_samples 1
+    python scripts/optimize_noise.py --max_samples 1 --mode per_question --num_steps 5
 """
 
 import os
@@ -28,7 +31,9 @@ def main(
     benchmark: str = "mmmu",
     gpu_ids: str = "0,1,2,3",
     max_samples: int = 50,
-    num_steps: int = 50,
+    mode: str = "both",
+    num_steps: int = 20,
+    num_epochs: int = 10,
     lr: float = 0.001,
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
@@ -40,7 +45,9 @@ def main(
         benchmark: Benchmark name (mmmu, pope, etc.).
         gpu_ids: Comma-separated GPU indices (default: 0,1,2,3 for 4x Titan X Pascal).
         max_samples: Number of questions to optimize.
-        num_steps: Gradient descent steps per question.
+        mode: 'universal', 'per_question', or 'both' (universal first, then per-question).
+        num_steps: Gradient descent steps per question (per-question mode).
+        num_epochs: Number of epochs (universal mode).
         lr: Adam learning rate for optimization.
         model_path: HuggingFace model path.
         conv_mode: Conversation template.
@@ -69,9 +76,13 @@ def main(
     remapped_gpus = list(range(len(gpu_list)))
 
     logger.info(f"Benchmark: {benchmark}")
+    logger.info(f"Mode: {mode}")
     logger.info(f"GPUs: {gpu_list} (remapped to {remapped_gpus})")
     logger.info(f"Max samples: {max_samples}")
-    logger.info(f"Optimization steps: {num_steps}")
+    if mode in ("universal", "both"):
+        logger.info(f"Universal epochs: {num_epochs}")
+    if mode in ("per_question", "both"):
+        logger.info(f"Per-question steps: {num_steps}")
     logger.info(f"Learning rate: {lr}")
 
     # Load model
@@ -90,22 +101,45 @@ def main(
     bench = get_benchmark(benchmark)
     bench.load(max_samples=max_samples)
 
-    # Run optimization
-    from src.optimization.embedding_optimizer import optimize_per_question
+    # Run optimization(s)
+    from src.optimization.embedding_optimizer import optimize_universal, optimize_per_question
 
-    summary = optimize_per_question(
-        model=model,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        benchmark=bench,
-        max_samples=max_samples,
-        num_steps=num_steps,
-        lr=lr,
-        conv_mode=conv_mode,
-        results_dir=results_dir,
-    )
+    if mode in ("universal", "both"):
+        logger.info("=" * 60)
+        logger.info("PHASE 1: Universal embedding optimization")
+        logger.info("=" * 60)
+        universal_summary = optimize_universal(
+            model=model,
+            tokenizer=tokenizer,
+            image_processor=image_processor,
+            benchmark=bench,
+            max_samples=max_samples,
+            num_epochs=num_epochs,
+            lr=lr,
+            conv_mode=conv_mode,
+            results_dir=results_dir,
+        )
+        logger.info(f"Universal results: {universal_summary}")
 
-    logger.info(f"Done! Results: {summary}")
+    if mode in ("per_question", "both"):
+        logger.info("=" * 60)
+        logger.info("PHASE 2: Per-question embedding optimization")
+        logger.info("=" * 60)
+        per_q_summary = optimize_per_question(
+            model=model,
+            tokenizer=tokenizer,
+            image_processor=image_processor,
+            benchmark=bench,
+            max_samples=max_samples,
+            num_steps=num_steps,
+            lr=lr,
+            conv_mode=conv_mode,
+            results_dir=results_dir,
+            _skip_setup=mode == "both",  # already set up by universal
+        )
+        logger.info(f"Per-question results: {per_q_summary}")
+
+    logger.info("All optimization complete!")
 
 
 if __name__ == "__main__":

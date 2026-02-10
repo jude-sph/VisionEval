@@ -1,7 +1,11 @@
 """Embedding-space noise optimization for Cambrian-8B.
 
-Optimizes 4 learnable tensors (one per vision encoder output) to maximize
+Optimizes learnable tensors (one per vision encoder output) to maximize
 the probability of the correct answer. Bypasses vision encoders entirely.
+
+Two modes:
+  - Universal: ONE set of embeddings optimized across all questions
+  - Per-question: fresh embeddings optimized independently per question
 """
 
 import json
@@ -36,6 +40,223 @@ def _init_features(
     return features
 
 
+def _setup_model_for_optimization(model, image_processor):
+    """Shared setup: discover shapes, offload encoders, enable checkpointing.
+
+    Returns:
+        (shapes, device, dtype)
+    """
+    device = next(model.parameters()).device
+    dtype = torch.float32
+
+    num_devices = len(set(p.device for p in model.parameters()))
+    logger.info(f"Model spread across {num_devices} device(s)")
+
+    shapes = get_encoder_output_shapes(model, image_processor)
+
+    # Free vision encoder memory — encode_images is patched so they're unused.
+    inner = getattr(model, "model", model)
+    towers = getattr(inner, "vision_tower_aux_list", None)
+    if towers:
+        for tower in towers:
+            tower.cpu()
+        torch.cuda.empty_cache()
+        logger.info(f"Moved {len(towers)} vision encoders to CPU")
+
+    # Enable gradient checkpointing (train mode required).
+    model.train()
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        logger.info("Gradient checkpointing enabled (non-reentrant, train mode)")
+
+    return shapes, device, dtype
+
+
+def _check_answer(model, tokenizer, features, question_text, benchmark, sample, device, conv_mode):
+    """Single forward pass + argmax to check if model answers correctly."""
+    with torch.no_grad(), encode_images_hook(model, features):
+        output = model.forward(
+            input_ids=tokenizer_image_token(
+                prompt=build_prompt(question_text, conv_mode=conv_mode, include_image=True),
+                tokenizer=tokenizer,
+                image_token_index=IMAGE_TOKEN_INDEX,
+                return_tensors="pt",
+            ).unsqueeze(0).to(device),
+            images=[
+                torch.zeros(1, 3, 384, 384, device=device, dtype=model.dtype)
+                for _ in range(4)
+            ],
+            image_sizes=[(384, 384)],
+        )
+        next_token_id = output.logits[0, -1].argmax().item()
+        response = tokenizer.decode([next_token_id]).strip()
+
+    prediction = benchmark.extract_answer(response, sample)
+    correct = benchmark.score(prediction, sample)
+    return response, prediction, correct
+
+
+def optimize_universal(
+    model,
+    tokenizer,
+    image_processor,
+    benchmark: Benchmark,
+    max_samples: int = 50,
+    num_epochs: int = 10,
+    lr: float = 0.001,
+    conv_mode: str = "llama_3",
+    results_dir: str = "results/optimization",
+) -> dict:
+    """Optimize ONE set of embeddings across all questions.
+
+    Trains shared feature tensors by accumulating gradients across all
+    questions per epoch, then taking one optimizer step.
+
+    Args:
+        model: Loaded Cambrian model.
+        tokenizer: Tokenizer.
+        image_processor: Image processor (used to discover encoder output shapes).
+        benchmark: Loaded benchmark instance.
+        max_samples: Number of questions to train on.
+        num_epochs: Number of full passes through all questions.
+        lr: Adam learning rate.
+        conv_mode: Conversation template.
+        results_dir: Where to save results.
+
+    Returns:
+        Summary dict with accuracy metrics.
+    """
+    os.makedirs(results_dir, exist_ok=True)
+    shapes, device, dtype = _setup_model_for_optimization(model, image_processor)
+
+    samples = list(benchmark)
+    if max_samples:
+        samples = samples[:max_samples]
+    total = len(samples)
+
+    # One set of features for ALL questions
+    features = _init_features(shapes, device, dtype)
+    optimizer = torch.optim.Adam(features, lr=lr)
+
+    results_file = os.path.join(results_dir, f"{benchmark.name}_universal_embeddings.jsonl")
+    run_start = time.time()
+
+    logger.info(f"Starting UNIVERSAL optimization: {total} questions, {num_epochs} epochs, lr={lr}")
+    logger.info(f"Results file: {results_file}")
+
+    epoch_losses = []
+
+    for epoch in range(num_epochs):
+        epoch_start = time.time()
+        optimizer.zero_grad()
+        epoch_loss = 0
+        nan_detected = False
+
+        for sample_idx, sample in enumerate(samples):
+            question_text = benchmark.format_question(sample)
+            answer_text = sample.ground_truth
+
+            with encode_images_hook(model, features):
+                loss = compute_teacher_forcing_loss(
+                    model, tokenizer, question_text, answer_text,
+                    conv_mode=conv_mode,
+                )
+
+            # Average gradient across questions
+            (loss / total).backward()
+            loss_val = loss.item()
+
+            if not torch.isfinite(torch.tensor(loss_val)):
+                logger.warning(f"  Epoch {epoch + 1} Q{sample_idx + 1}: NaN/Inf loss")
+                nan_detected = True
+                break
+
+            epoch_loss += loss_val
+
+        if nan_detected:
+            logger.warning(f"  Epoch {epoch + 1}: NaN detected, stopping")
+            break
+
+        torch.nn.utils.clip_grad_norm_(features, max_norm=1.0)
+        optimizer.step()
+
+        avg_loss = epoch_loss / total
+        epoch_losses.append(avg_loss)
+        epoch_time = time.time() - epoch_start
+        elapsed = time.time() - run_start
+        eta = (num_epochs - epoch - 1) * epoch_time
+
+        logger.info(
+            f"  Epoch {epoch + 1}/{num_epochs}: avg_loss={avg_loss:.4f} "
+            f"| {epoch_time:.0f}s | ETA {eta / 60:.0f}min"
+        )
+
+    opt_time = time.time() - run_start
+    logger.info(f"Universal optimization done in {opt_time:.0f}s. Evaluating accuracy...")
+
+    # Evaluate accuracy on all questions with the universal embeddings
+    correct_count = 0
+    per_question_results = []
+
+    for sample_idx, sample in enumerate(samples):
+        question_text = benchmark.format_question(sample)
+        response, prediction, correct = _check_answer(
+            model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+        )
+        if correct:
+            correct_count += 1
+
+        per_question_results.append({
+            "question_id": sample.question_id,
+            "question": sample.question[:200],
+            "ground_truth": sample.ground_truth,
+            "prediction": prediction,
+            "raw_response": response[:200],
+            "correct": correct,
+        })
+
+        if (sample_idx + 1) % 10 == 0:
+            acc = correct_count / (sample_idx + 1) * 100
+            logger.info(f"  Eval [{sample_idx + 1}/{total}]: acc={acc:.1f}%")
+
+    accuracy = correct_count / total * 100 if total > 0 else 0
+
+    # Save universal embedding tensors
+    tensors_dir = os.path.join(results_dir, "tensors")
+    os.makedirs(tensors_dir, exist_ok=True)
+    torch.save(
+        [f.detach().cpu() for f in features],
+        os.path.join(tensors_dir, f"{benchmark.name}_universal.pt"),
+    )
+
+    # Write per-question eval results
+    with open(results_file, "w") as f:
+        for r in per_question_results:
+            f.write(json.dumps(r) + "\n")
+
+    summary = {
+        "mode": "universal",
+        "benchmark": benchmark.name,
+        "num_samples": total,
+        "num_epochs": len(epoch_losses),
+        "learning_rate": lr,
+        "accuracy": round(accuracy, 2),
+        "initial_avg_loss": round(epoch_losses[0], 4) if epoch_losses else 0,
+        "final_avg_loss": round(epoch_losses[-1], 4) if epoch_losses else 0,
+        "loss_curve": [round(l, 4) for l in epoch_losses],
+        "optimization_time_s": round(opt_time, 1),
+    }
+
+    summary_file = os.path.join(results_dir, f"{benchmark.name}_universal_summary.json")
+    with open(summary_file, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info(f"Universal optimization complete: {summary}")
+    return summary
+
+
 def optimize_per_question(
     model,
     tokenizer,
@@ -46,6 +267,7 @@ def optimize_per_question(
     lr: float = 0.001,
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
+    _skip_setup: bool = False,
 ) -> dict:
     """Optimize embedding-space noise independently for each question.
 
@@ -65,48 +287,19 @@ def optimize_per_question(
         lr: Adam learning rate.
         conv_mode: Conversation template.
         results_dir: Where to save results.
+        _skip_setup: If True, skip model setup (already done by universal).
 
     Returns:
         Summary dict with accuracy metrics.
     """
     os.makedirs(results_dir, exist_ok=True)
-    device = next(model.parameters()).device
-    # Use float32 for feature tensors and optimizer states to avoid FP16 overflow.
-    # The encode_images_hook casts to model dtype (float16) inside the forward pass;
-    # this cast is differentiable so gradients flow back to float32 tensors.
-    dtype = torch.float32
 
-    # Detect multi-GPU: if model is spread across devices, we have ample VRAM
-    num_devices = len(set(p.device for p in model.parameters()))
-    multi_gpu = num_devices > 1
-    logger.info(f"Model spread across {num_devices} device(s)")
-
-    # Discover encoder output shapes from a dummy forward pass
-    shapes = get_encoder_output_shapes(model, image_processor)
-
-    # Free vision encoder memory — encode_images is patched so they're unused.
-    # Cambrian's builder loads all 4 towers onto GPU 0 regardless of device_map,
-    # so this is needed on multi-GPU too (saves ~3.8GB on GPU 0).
-    inner = getattr(model, "model", model)
-    towers = getattr(inner, "vision_tower_aux_list", None)
-    if towers:
-        for tower in towers:
-            tower.cpu()
-        torch.cuda.empty_cache()
-        logger.info(f"Moved {len(towers)} vision encoders to CPU")
-
-    # Enable gradient checkpointing to save memory during backward pass.
-    # Cambrian checks `self.gradient_checkpointing and self.training`, so we
-    # must put model in train mode for checkpointing to activate.
-    # use_reentrant=False is critical: the default (reentrant) mode requires
-    # checkpoint inputs to have requires_grad=True, but our frozen model's
-    # hidden_states may not. Non-reentrant mode works regardless.
-    model.train()
-    if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
-        logger.info("Gradient checkpointing enabled (non-reentrant, train mode)")
+    if _skip_setup:
+        device = next(model.parameters()).device
+        dtype = torch.float32
+        shapes = get_encoder_output_shapes(model, image_processor)
+    else:
+        shapes, device, dtype = _setup_model_for_optimization(model, image_processor)
 
     results = []
     correct_after = 0
@@ -138,7 +331,7 @@ def optimize_per_question(
     total = len(samples)
     run_start = time.time()
 
-    logger.info(f"Starting optimization: {total} questions, {num_steps} steps each, lr={lr}")
+    logger.info(f"Starting PER-QUESTION optimization: {total} questions, {num_steps} steps each, lr={lr}")
     logger.info(f"Results file: {results_file}")
 
     for sample_idx, sample in enumerate(samples):
@@ -202,29 +395,9 @@ def optimize_per_question(
         final_loss = losses[-1] if losses else float("nan")
 
         # Check accuracy AFTER optimization: single forward pass + argmax.
-        # Avoids model.generate() which is extremely slow on multi-GPU
-        # (tensor transfers between GPUs at every layer for every token).
-        # For MCQ benchmarks we only need the first generated token.
-        with torch.no_grad(), encode_images_hook(model, features):
-            output = model.forward(
-                input_ids=tokenizer_image_token(
-                    prompt=build_prompt(question_text, conv_mode=conv_mode, include_image=True),
-                    tokenizer=tokenizer,
-                    image_token_index=IMAGE_TOKEN_INDEX,
-                    return_tensors="pt",
-                ).unsqueeze(0).to(device),
-                images=[
-                    torch.zeros(1, 3, 384, 384, device=device, dtype=model.dtype)
-                    for _ in range(4)
-                ],
-                image_sizes=[(384, 384)],
-            )
-            # Argmax of the last token's logits = first generated token
-            next_token_id = output.logits[0, -1].argmax().item()
-            response = tokenizer.decode([next_token_id]).strip()
-
-        prediction = benchmark.extract_answer(response, sample)
-        correct = benchmark.score(prediction, sample)
+        response, prediction, correct = _check_answer(
+            model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+        )
         if correct:
             correct_after += 1
 
@@ -285,6 +458,7 @@ def optimize_per_question(
     nan_count = sum(1 for r in results if r.get("nan_detected"))
 
     summary = {
+        "mode": "per_question",
         "benchmark": benchmark.name,
         "num_samples": len(results),
         "num_nan": nan_count,
@@ -300,5 +474,5 @@ def optimize_per_question(
     with open(summary_file, "w") as f:
         json.dump(summary, f, indent=2)
 
-    logger.info(f"Optimization complete: {summary}")
+    logger.info(f"Per-question optimization complete: {summary}")
     return summary
