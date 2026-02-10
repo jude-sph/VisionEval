@@ -12,7 +12,7 @@ class GQABenchmark(Benchmark):
     scoring_method = "exact_match"
 
     def load(self, max_samples: int | None = None) -> None:
-        dataset = load_dataset("lmms-lab/GQA", "testdev_balanced", split="testdev")
+        dataset = load_dataset("lmms-lab/GQA", "testdev_balanced_images", split="testdev")
         if max_samples:
             dataset = dataset.select(range(min(max_samples, len(dataset))))
         self._dataset = dataset
