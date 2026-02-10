@@ -70,6 +70,30 @@ def load_cambrian(
     else:
         device = "cuda"
 
+    # Patch dispatch_model for INT8: accelerate calls model.to(device) inside
+    # dispatch_model when all layers map to one device, which bitsandbytes
+    # forbids. The model is already correctly placed after quantized loading,
+    # so we catch the error and return the model as-is. We then fix any
+    # CPU-stranded buffers below.
+    _originals = {}
+    if load_8bit:
+        import accelerate.big_modeling as _abm
+        import transformers.modeling_utils as _tmu
+        _orig = _abm.dispatch_model
+
+        def _safe_dispatch(model, device_map, **dm_kwargs):
+            try:
+                return _orig(model, device_map, **dm_kwargs)
+            except ValueError as e:
+                if "not supported for" in str(e) and "bitsandbytes" in str(e):
+                    logger.info("Skipped dispatch_model .to() for INT8 model")
+                    return model
+                raise
+
+        _abm.dispatch_model = _safe_dispatch
+        _tmu.dispatch_model = _safe_dispatch
+        _originals = {"abm": (_abm, _orig), "tmu": (_tmu, _orig)}
+
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path=model_path,
         model_base=None,
@@ -80,6 +104,10 @@ def load_cambrian(
         use_flash_attn=use_flash_attn,
         **kwargs,
     )
+
+    # Restore original dispatch_model
+    for mod, orig in _originals.values():
+        mod.dispatch_model = orig
 
     # Fix INT8 device placement: device_map="auto" can leave some buffers
     # (e.g., rotary embeddings inv_freq) on CPU. Move them to the target GPU.
