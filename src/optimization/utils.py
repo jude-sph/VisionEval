@@ -17,14 +17,19 @@ def encode_images_hook(model, features: list[torch.Tensor]):
     This bypasses the vision encoders entirely, allowing us to optimize
     the encoder output tensors directly via gradient descent.
 
+    Features may be float32 (for optimizer stability) — they are cast to
+    the model's dtype (float16) inside the hook. The cast is differentiable,
+    so gradients flow back to the float32 tensors.
+
     Args:
         model: The Cambrian model.
         features: List of 4 tensors (one per encoder) to inject.
     """
     original_fn = model.encode_images
+    target_dtype = model.dtype
 
     def patched_encode(image_aux_list, *args, **kwargs):
-        return features
+        return [f.to(target_dtype) for f in features]
 
     model.encode_images = patched_encode
     try:

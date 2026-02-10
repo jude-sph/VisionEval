@@ -362,10 +362,32 @@ def print_progress(results_dir: str = "results"):
     opt_dir = Path(results_dir) / "optimization"
     opt_files = sorted(opt_dir.glob("*_optimized_embeddings.jsonl")) if opt_dir.exists() else []
 
-    if opt_files:
+    # Also check if noise optimization is running (tmux session or PID)
+    noise_running = False
+    noise_pid_file = logs_dir / "noise.pid"
+    if noise_pid_file.exists():
+        try:
+            pid = int(noise_pid_file.read_text().strip())
+            os.kill(pid, 0)
+            noise_running = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    if not noise_running:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["tmux", "has-session", "-t", "noise"],
+                capture_output=True, timeout=5,
+            )
+            noise_running = result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    if opt_files or noise_running:
+        noise_status = "\033[92mRUNNING\033[0m" if noise_running else "\033[91mSTOPPED\033[0m"
         print()
-        print(f"  {'Noise Optimization':}")
-        opt_header = f"  {'Benchmark':<12} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'Avg/q':>8} {'ETA':>8} {'Updated':>12}"
+        print(f"  Noise Optimization  [{noise_status}]")
+        opt_header = f"  {'Benchmark':<12} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'NaN':>5} {'Avg/q':>8} {'ETA':>10} {'Updated':>12}"
         print(opt_header)
         print("  " + "-" * (len(opt_header) - 2))
 
@@ -375,10 +397,12 @@ def print_progress(results_dir: str = "results"):
 
             done = 0
             correct = 0
+            nan_count = 0
             total_loss_init = 0
             total_loss_final = 0
+            valid_loss_count = 0
             total_time = 0
-            expected = 50  # default
+            expected = 50  # default max_samples
 
             with open(opt_path) as f:
                 for line in f:
@@ -389,8 +413,12 @@ def print_progress(results_dir: str = "results"):
                         done += 1
                         if r.get("correct"):
                             correct += 1
+                        if r.get("nan_detected"):
+                            nan_count += 1
                         total_loss_init += r.get("initial_loss", 0)
-                        total_loss_final += r.get("final_loss", 0)
+                        if r.get("final_loss") is not None:
+                            total_loss_final += r["final_loss"]
+                            valid_loss_count += 1
                         total_time += r.get("optimization_time_s", 0)
                     except json.JSONDecodeError:
                         continue
@@ -408,8 +436,8 @@ def print_progress(results_dir: str = "results"):
             last_update = datetime.fromtimestamp(opt_path.stat().st_mtime) if done > 0 else None
 
             acc = (correct / done * 100) if done > 0 else 0
-            avg_loss = (total_loss_final / done) if done > 0 else 0
-            avg_drop = ((total_loss_init - total_loss_final) / done) if done > 0 else 0
+            avg_loss = (total_loss_final / valid_loss_count) if valid_loss_count > 0 else 0
+            avg_drop = ((total_loss_init - total_loss_final) / valid_loss_count) if valid_loss_count > 0 else 0
             avg_time = (total_time / done) if done > 0 else 0
             opt_remaining = (expected - done) * avg_time if done > 0 and done < expected else 0
             opt_eta_str = format_duration(opt_remaining) if done > 0 and done < expected else ("-" if done == 0 else "done")
@@ -421,18 +449,26 @@ def print_progress(results_dir: str = "results"):
             else:
                 status = "      "
 
+            nan_str = str(nan_count) if nan_count > 0 else "-"
+
             print(
                 f"{status} {bench_display:<12} "
                 f"{done:>4}/{expected:<4} "
                 f"{acc:>6.1f}% "
                 f"{avg_loss:>9.3f} "
                 f"{avg_drop:>+9.3f} "
+                f"{nan_str:>5} "
                 f"{avg_time:>7.1f}s "
-                f"{opt_eta_str:>8} "
+                f"{opt_eta_str:>10} "
                 f"{format_time_ago(last_update):>12}"
             )
 
         print("  " + "-" * (len(opt_header) - 2))
+
+        # Noise optimization log hint
+        noise_log = logs_dir / "optimize_noise.log"
+        if noise_log.exists():
+            print(f"  Log: tail -f {noise_log}")
 
     # Log file hint
     log_file = logs_dir / "eval.log"

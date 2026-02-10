@@ -29,7 +29,7 @@ def main(
     gpu_ids: str = "0,1,2,3",
     max_samples: int = 50,
     num_steps: int = 50,
-    lr: float = 0.01,
+    lr: float = 0.001,
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
