@@ -233,10 +233,85 @@ def print_progress(results_dir: str = "results"):
     overall_acc = (total_correct / total_valid * 100) if total_valid > 0 else 0
     print(f"  {'TOTAL':<12} {'':12} {total_done:>5}/{total_expected:<5} {overall_pct:>5.1f}% {overall_acc:>6.1f}%")
 
-    # ETA for active runs
-    if active_runs:
-        max_eta = max(r[3] for r in active_runs)
-        print(f"\n  Longest active ETA: {format_duration(max_eta)}")
+    # --- Per-benchmark ETAs ---
+    # Collect avg time per question for each benchmark (from any condition with data)
+    bench_avg_s = {}  # benchmark -> avg seconds per question
+    for benchmark, condition in ALL_JOBS:
+        jsonl_path = raw_dir / f"{benchmark}_{condition}.jsonl"
+        stats = get_run_stats(jsonl_path)
+        if stats["valid"] > 0 and stats["avg_ms"] > 0:
+            # Keep the first observed average per benchmark (from most-completed condition)
+            if benchmark not in bench_avg_s:
+                bench_avg_s[benchmark] = stats["avg_ms"] / 1000
+
+    # Global average fallback (for benchmarks with no data at all)
+    all_avg_s = sum(bench_avg_s.values()) / len(bench_avg_s) if bench_avg_s else 0
+
+    # Compute per-benchmark and total remaining time
+    # Jobs run sequentially, so total ETA = sum of all remaining job times
+    total_remaining_s = 0
+    bench_remaining = {}  # benchmark -> remaining seconds
+
+    for benchmark, condition in ALL_JOBS:
+        jsonl_path = raw_dir / f"{benchmark}_{condition}.jsonl"
+        expected = EXPECTED_SAMPLES.get(benchmark, 0)
+        stats = get_run_stats(jsonl_path)
+        done = stats["done"]
+        remaining_questions = max(0, expected - done)
+
+        if remaining_questions == 0:
+            job_eta_s = 0
+        else:
+            avg_s = bench_avg_s.get(benchmark, all_avg_s)
+            job_eta_s = remaining_questions * avg_s
+
+        total_remaining_s += job_eta_s
+        bench_remaining[benchmark] = bench_remaining.get(benchmark, 0) + job_eta_s
+
+    # Print per-benchmark ETAs
+    print()
+    print(f"  {'Benchmark ETAs':}")
+    for benchmark in EXPECTED_SAMPLES:
+        bench_display = BENCHMARK_NAMES.get(benchmark, benchmark)
+        expected = EXPECTED_SAMPLES[benchmark]
+        # Count conditions done/total for this benchmark
+        conditions_done = 0
+        conditions_total = 0
+        bench_done = 0
+        for b, c in ALL_JOBS:
+            if b == benchmark:
+                conditions_total += 1
+                jsonl_path = raw_dir / f"{b}_{c}.jsonl"
+                stats = get_run_stats(jsonl_path)
+                bench_done += stats["done"]
+                if stats["done"] >= expected:
+                    conditions_done += 1
+
+        bench_expected = expected * conditions_total
+        bench_pct = bench_done / bench_expected * 100 if bench_expected > 0 else 0
+        remaining_s = bench_remaining.get(benchmark, 0)
+
+        # Progress bar (20 chars wide)
+        bar_width = 20
+        filled = int(bar_width * bench_pct / 100)
+        bar = "=" * filled + ">" * (1 if filled < bar_width else 0) + " " * (bar_width - filled - 1)
+
+        if remaining_s > 0:
+            eta_str = format_duration(remaining_s)
+            print(f"  {bench_display:<12} [{bar}] {conditions_done}/{conditions_total} conditions   ~{eta_str} remaining")
+        else:
+            if conditions_done == conditions_total:
+                print(f"  {bench_display:<12} [{'=' * bar_width}] {conditions_done}/{conditions_total} conditions   done")
+            else:
+                print(f"  {bench_display:<12} [{bar}] {conditions_done}/{conditions_total} conditions   estimating...")
+
+    # Total system ETA
+    if total_remaining_s > 0:
+        completion_time = datetime.now() + timedelta(seconds=total_remaining_s)
+        print(f"\n  Total estimated remaining:  {format_duration(total_remaining_s)}")
+        print(f"  Estimated completion:       {completion_time.strftime('%Y-%m-%d %H:%M')}")
+    elif total_done > 0 and total_done >= total_expected:
+        print(f"\n  All benchmark evaluations complete!")
 
     # Noise optimization section
     opt_dir = Path(results_dir) / "optimization"
@@ -245,7 +320,7 @@ def print_progress(results_dir: str = "results"):
     if opt_files:
         print()
         print(f"  {'Noise Optimization':}")
-        opt_header = f"  {'Benchmark':<12} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'Avg/q':>8} {'Updated':>12}"
+        opt_header = f"  {'Benchmark':<12} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'Avg/q':>8} {'ETA':>8} {'Updated':>12}"
         print(opt_header)
         print("  " + "-" * (len(opt_header) - 2))
 
@@ -291,6 +366,8 @@ def print_progress(results_dir: str = "results"):
             avg_loss = (total_loss_final / done) if done > 0 else 0
             avg_drop = ((total_loss_init - total_loss_final) / done) if done > 0 else 0
             avg_time = (total_time / done) if done > 0 else 0
+            opt_remaining = (expected - done) * avg_time if done > 0 and done < expected else 0
+            opt_eta_str = format_duration(opt_remaining) if done > 0 and done < expected else ("-" if done == 0 else "done")
 
             if done >= expected and expected > 0:
                 status = "\033[92m DONE \033[0m"
@@ -306,15 +383,11 @@ def print_progress(results_dir: str = "results"):
                 f"{avg_loss:>9.3f} "
                 f"{avg_drop:>+9.3f} "
                 f"{avg_time:>7.1f}s "
+                f"{opt_eta_str:>8} "
                 f"{format_time_ago(last_update):>12}"
             )
 
         print("  " + "-" * (len(opt_header) - 2))
-
-    # ETA for active runs
-    if active_runs:
-        max_eta = max(r[3] for r in active_runs)
-        print(f"\n  Longest active ETA: {format_duration(max_eta)}")
 
     # Log file hint
     log_file = logs_dir / "eval.log"
