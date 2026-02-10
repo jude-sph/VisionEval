@@ -30,6 +30,7 @@ def load_cambrian(
     gpu_ids: Optional[list[int]] = None,
     load_8bit: bool = False,
     use_flash_attn: bool = True,
+    gpu0_max_memory: str = "7GiB",
 ):
     """Load Cambrian model with appropriate device placement.
 
@@ -42,6 +43,10 @@ def load_cambrian(
         load_8bit: Ignored (INT8 not supported with this Cambrian/accelerate
             version). Always loads in FP16.
         use_flash_attn: Enable Flash Attention 2 for faster prefill.
+        gpu0_max_memory: Max memory for GPU 0 when using multi-GPU.
+            Default "7GiB" for inference/embedding optimization (encoders
+            offloaded to CPU). Use "4GiB" for pixel optimization where
+            encoders stay on GPU 0 and need room for backward activations.
 
     Returns:
         (tokenizer, model, image_processor, context_len)
@@ -59,7 +64,7 @@ def load_cambrian(
     if gpu_ids is not None and len(gpu_ids) > 1:
         kwargs["device_map"] = "auto"
         max_memory = {i: "11GiB" for i in gpu_ids}
-        max_memory[gpu_ids[0]] = "7GiB"
+        max_memory[gpu_ids[0]] = gpu0_max_memory
         max_memory["cpu"] = "16GiB"
         kwargs["max_memory"] = max_memory
     elif gpu_ids is not None and len(gpu_ids) == 1:
