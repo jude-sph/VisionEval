@@ -10,7 +10,11 @@ import time
 import logging
 import torch
 
+from cambrian.mm_utils import tokenizer_image_token
+from cambrian.constants import IMAGE_TOKEN_INDEX
+
 from src.benchmarks.base import Benchmark, BenchmarkSample
+from src.model.inference import build_prompt
 from src.optimization.utils import encode_images_hook, get_encoder_output_shapes
 from src.optimization.teacher_forcing import compute_teacher_forcing_loss
 
@@ -197,36 +201,27 @@ def optimize_per_question(
         opt_time = time.time() - start_time
         final_loss = losses[-1] if losses else float("nan")
 
-        # Check accuracy AFTER optimization: generate an answer.
-        # Temporarily disable gradient checkpointing and switch to eval mode
-        # so that model.generate() can use KV cache (much faster).
-        model.eval()
-        if hasattr(model, "gradient_checkpointing_disable"):
-            model.gradient_checkpointing_disable()
-        model.config.use_cache = True
-
+        # Check accuracy AFTER optimization: single forward pass + argmax.
+        # Avoids model.generate() which is extremely slow on multi-GPU
+        # (tensor transfers between GPUs at every layer for every token).
+        # For MCQ benchmarks we only need the first generated token.
         with torch.no_grad(), encode_images_hook(model, features):
-            from src.model.inference import run_inference
-            from PIL import Image
-            dummy_image = Image.new("RGB", (384, 384), color=(128, 128, 128))
-            inference_result = run_inference(
-                model=model,
-                tokenizer=tokenizer,
-                image_processor=image_processor,
-                question=question_text,
-                image=dummy_image,
-                conv_mode=conv_mode,
-                max_new_tokens=32,
+            output = model.forward(
+                input_ids=tokenizer_image_token(
+                    prompt=build_prompt(question_text, conv_mode=conv_mode, include_image=True),
+                    tokenizer=tokenizer,
+                    image_token_index=IMAGE_TOKEN_INDEX,
+                    return_tensors="pt",
+                ).unsqueeze(0).to(device),
+                images=[
+                    torch.zeros(1, 3, 384, 384, device=device, dtype=model.dtype)
+                    for _ in range(4)
+                ],
+                image_sizes=[(384, 384)],
             )
-            response = inference_result["response"]
-
-        # Re-enable gradient checkpointing and train mode for next question
-        model.train()
-        if hasattr(model, "gradient_checkpointing_enable"):
-            model.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
-        model.config.use_cache = False
+            # Argmax of the last token's logits = first generated token
+            next_token_id = output.logits[0, -1].argmax().item()
+            response = tokenizer.decode([next_token_id]).strip()
 
         prediction = benchmark.extract_answer(response, sample)
         correct = benchmark.score(prediction, sample)
