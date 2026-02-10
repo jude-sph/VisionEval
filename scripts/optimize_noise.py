@@ -61,6 +61,8 @@ def main(
         gpu_list = [int(x) for x in str(gpu_ids).split(",")]
 
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_list)
+    # Reduce CUDA memory fragmentation — we're ~112MB short and have 160MB fragmented
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     remapped_gpus = list(range(len(gpu_list)))
 
     logger.info(f"Benchmark: {benchmark}")
