@@ -2,6 +2,7 @@
 results/raw/
 results/aggregated/
 results/plots/
+results/optimization/
 
 # Logs
 logs/
