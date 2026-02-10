@@ -89,10 +89,15 @@ def optimize_per_question(
     # Enable gradient checkpointing to save memory during backward pass.
     # Cambrian checks `self.gradient_checkpointing and self.training`, so we
     # must put model in train mode for checkpointing to activate.
+    # use_reentrant=False is critical: the default (reentrant) mode requires
+    # checkpoint inputs to have requires_grad=True, but our frozen model's
+    # hidden_states may not. Non-reentrant mode works regardless.
     model.train()
     if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
-        logger.info("Gradient checkpointing enabled (model set to train mode)")
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        logger.info("Gradient checkpointing enabled (non-reentrant, train mode)")
 
     results = []
     correct_after = 0
