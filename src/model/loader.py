@@ -62,12 +62,15 @@ def load_cambrian(
     else:
         device = "cuda"
 
-    # Patch accelerate's dispatch_model to handle bitsandbytes quantized models.
-    # Older versions of accelerate call model.to(device) inside dispatch_model,
-    # which bitsandbytes forbids. The model is already on the correct device
-    # after quantized loading, so we can safely skip the .to() call.
+    # Patch dispatch_model to handle bitsandbytes quantized models.
+    # Older accelerate calls model.to(device) inside dispatch_model, which
+    # bitsandbytes forbids. Must patch in BOTH accelerate.big_modeling AND
+    # transformers.modeling_utils since transformers imports it directly.
+    _patched_modules = []
     if load_8bit:
         import accelerate.big_modeling as _abm
+        import transformers.modeling_utils as _tmu
+
         _original_dispatch = _abm.dispatch_model
 
         def _safe_dispatch(model, device_map, **dm_kwargs):
@@ -80,6 +83,8 @@ def load_cambrian(
                 raise
 
         _abm.dispatch_model = _safe_dispatch
+        _tmu.dispatch_model = _safe_dispatch
+        _patched_modules = [(_abm, _original_dispatch), (_tmu, _original_dispatch)]
 
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path=model_path,
@@ -93,8 +98,8 @@ def load_cambrian(
     )
 
     # Restore original dispatch_model
-    if load_8bit:
-        _abm.dispatch_model = _original_dispatch
+    for mod, orig in _patched_modules:
+        mod.dispatch_model = orig
 
     model.eval()
     return tokenizer, model, image_processor, context_len
