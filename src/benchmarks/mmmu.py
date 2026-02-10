@@ -20,6 +20,13 @@ class MMMUBenchmark(Benchmark):
         for config in configs:
             splits.append(load_dataset("MMMU/MMMU", config, split="validation"))
         dataset = concatenate_datasets(splits)
+        # Filter to rows with at least one image before limiting,
+        # so max_samples controls actual yielded samples
+        img_keys = ["image_1", "image_2", "image_3", "image_4",
+                     "image_5", "image_6", "image_7"]
+        dataset = dataset.filter(
+            lambda row: any(row.get(k) is not None for k in img_keys)
+        )
         if max_samples:
             dataset = dataset.select(range(min(max_samples, len(dataset))))
         self._dataset = dataset

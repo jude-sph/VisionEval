@@ -28,6 +28,13 @@ class GQABenchmark(Benchmark):
         for row in images_ds:
             image_lookup[row["id"]] = row["image"]
 
+        # Filter to instructions that have matching images BEFORE limiting,
+        # so max_samples controls actual yielded samples, not raw rows
+        valid_image_ids = set(image_lookup.keys())
+        instructions_ds = instructions_ds.filter(
+            lambda x: x.get("imageId", "") in valid_image_ids
+        )
+
         if max_samples:
             instructions_ds = instructions_ds.select(
                 range(min(max_samples, len(instructions_ds)))
@@ -36,7 +43,7 @@ class GQABenchmark(Benchmark):
         self._instructions = instructions_ds
         self._image_lookup = image_lookup
         logger.info(
-            f"GQA loaded: {len(instructions_ds)} questions, "
+            f"GQA loaded: {len(instructions_ds)} questions (with images), "
             f"{len(image_lookup)} unique images"
         )
 
