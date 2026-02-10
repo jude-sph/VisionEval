@@ -24,7 +24,7 @@ class TextVQABenchmark(Benchmark):
     scoring_method = "vqa_accuracy"
 
     def load(self, max_samples: int | None = None) -> None:
-        dataset = load_dataset("textvqa", split="validation")
+        dataset = load_dataset("facebook/textvqa", split="validation")
         if max_samples:
             dataset = dataset.select(range(min(max_samples, len(dataset))))
         self._dataset = dataset
