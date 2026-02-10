@@ -74,6 +74,14 @@ def optimize_per_question(
     # Discover encoder output shapes from a dummy forward pass
     shapes = get_encoder_output_shapes(model, image_processor)
 
+    # Free vision encoder memory — encode_images is patched so they're unused.
+    # This saves ~3.8GB VRAM, critical for fitting backprop in 24GB FP16.
+    if hasattr(model, "get_vision_tower_aux_list"):
+        for tower in model.get_vision_tower_aux_list():
+            tower.cpu()
+        torch.cuda.empty_cache()
+        logger.info("Moved vision encoders to CPU to free VRAM for backprop")
+
     # Enable gradient checkpointing to save memory
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()

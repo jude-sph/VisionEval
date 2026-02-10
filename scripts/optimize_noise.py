@@ -27,7 +27,7 @@ def main(
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
-    load_8bit: bool = True,
+    load_8bit: bool = False,
 ):
     """Run embedding-space noise optimization on a benchmark.
 
