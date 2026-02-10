@@ -39,7 +39,7 @@ def optimize_per_question(
     benchmark: Benchmark,
     max_samples: int = 50,
     num_steps: int = 50,
-    lr: float = 0.01,
+    lr: float = 0.001,
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
 ) -> dict:
@@ -67,9 +67,10 @@ def optimize_per_question(
     """
     os.makedirs(results_dir, exist_ok=True)
     device = next(model.parameters()).device
-    # Always use float16 for feature tensors — projectors expect float16
-    # regardless of whether model weights are INT8 quantized
-    dtype = torch.float16
+    # Use float32 for feature tensors and optimizer states to avoid FP16 overflow.
+    # The encode_images_hook casts to model dtype (float16) inside the forward pass;
+    # this cast is differentiable so gradients flow back to float32 tensors.
+    dtype = torch.float32
 
     # Detect multi-GPU: if model is spread across devices, we have ample VRAM
     num_devices = len(set(p.device for p in model.parameters()))
@@ -157,6 +158,7 @@ def optimize_per_question(
         # Optimization loop with per-step logging
         losses = []
         start_time = time.time()
+        nan_detected = False
 
         for step in range(num_steps):
             optimizer.zero_grad()
@@ -168,8 +170,22 @@ def optimize_per_question(
                 )
 
             loss.backward()
+
+            # Gradient clipping to prevent FP16 overflow in mixed-precision chain
+            torch.nn.utils.clip_grad_norm_(features, max_norm=1.0)
+
             optimizer.step()
-            losses.append(loss.item())
+            loss_val = loss.item()
+
+            # NaN detection — stop early, don't corrupt results
+            if not torch.isfinite(torch.tensor(loss_val)):
+                logger.warning(
+                    f"  Q{sample_idx + 1}/{total} step {step + 1}: NaN/Inf loss, stopping early"
+                )
+                nan_detected = True
+                break
+
+            losses.append(loss_val)
 
             # Log every 10 steps within a question
             if (step + 1) % 10 == 0:
@@ -179,6 +195,7 @@ def optimize_per_question(
                 )
 
         opt_time = time.time() - start_time
+        final_loss = losses[-1] if losses else float("nan")
 
         # Check accuracy AFTER optimization: generate an answer
         with torch.no_grad(), encode_images_hook(model, features):
@@ -209,10 +226,11 @@ def optimize_per_question(
             "raw_response": response[:200],
             "correct": correct,
             "initial_loss": round(initial_loss, 4),
-            "final_loss": round(losses[-1], 4),
-            "loss_reduction": round(initial_loss - losses[-1], 4),
+            "final_loss": round(final_loss, 4) if not nan_detected else None,
+            "loss_reduction": round(initial_loss - final_loss, 4) if not nan_detected else None,
             "optimization_time_s": round(opt_time, 1),
-            "num_steps": num_steps,
+            "num_steps": len(losses),
+            "nan_detected": nan_detected,
         }
         results.append(result)
 
@@ -229,10 +247,11 @@ def optimize_per_question(
         eta = remaining * avg_time
 
         status = "CORRECT" if correct else "WRONG"
+        loss_str = f"{initial_loss:.3f}->{final_loss:.3f}" if not nan_detected else f"{initial_loss:.3f}->NaN"
         logger.info(
             f"[{done}/{total}] {sample.question_id}: {status} "
             f"(pred={prediction}, gt={answer_text}) "
-            f"loss {initial_loss:.3f}->{losses[-1]:.3f} "
+            f"loss {loss_str} "
             f"| acc={acc:.1f}% | {opt_time:.1f}s | ETA {eta / 60:.0f}min"
         )
 
@@ -242,16 +261,19 @@ def optimize_per_question(
 
     # Summary
     accuracy = correct_after / len(results) * 100 if results else 0
-    avg_loss_reduction = sum(r["loss_reduction"] for r in results) / len(results) if results else 0
+    valid_results = [r for r in results if r.get("loss_reduction") is not None]
+    avg_loss_reduction = sum(r["loss_reduction"] for r in valid_results) / len(valid_results) if valid_results else 0
+    nan_count = sum(1 for r in results if r.get("nan_detected"))
 
     summary = {
         "benchmark": benchmark.name,
         "num_samples": len(results),
+        "num_nan": nan_count,
         "num_steps": num_steps,
         "learning_rate": lr,
         "accuracy_after_optimization": round(accuracy, 2),
-        "avg_initial_loss": round(sum(r["initial_loss"] for r in results) / len(results), 4),
-        "avg_final_loss": round(sum(r["final_loss"] for r in results) / len(results), 4),
+        "avg_initial_loss": round(sum(r["initial_loss"] for r in results) / len(results), 4) if results else 0,
+        "avg_final_loss": round(sum(r["final_loss"] for r in valid_results) / len(valid_results), 4) if valid_results else 0,
         "avg_loss_reduction": round(avg_loss_reduction, 4),
     }
 
