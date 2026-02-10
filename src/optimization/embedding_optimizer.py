@@ -136,22 +136,34 @@ def optimize_universal(
         samples = samples[:max_samples]
     total = len(samples)
 
+    tensors_dir = os.path.join(results_dir, "tensors")
+    os.makedirs(tensors_dir, exist_ok=True)
+
     # One set of features for ALL questions
     features = _init_features(shapes, device, dtype)
     optimizer = torch.optim.Adam(features, lr=lr)
 
+    # Save initial (random) embeddings for comparison
+    torch.save(
+        [f.detach().cpu() for f in features],
+        os.path.join(tensors_dir, f"{benchmark.name}_universal_initial.pt"),
+    )
+
     results_file = os.path.join(results_dir, f"{benchmark.name}_universal_embeddings.jsonl")
+    epoch_log_file = os.path.join(results_dir, f"{benchmark.name}_universal_epochs.jsonl")
     run_start = time.time()
 
     logger.info(f"Starting UNIVERSAL optimization: {total} questions, {num_epochs} epochs, lr={lr}")
     logger.info(f"Results file: {results_file}")
 
     epoch_losses = []
+    epoch_accuracies = []
 
     for epoch in range(num_epochs):
         epoch_start = time.time()
         optimizer.zero_grad()
         epoch_loss = 0
+        per_question_losses = []
         nan_detected = False
 
         for sample_idx, sample in enumerate(samples):
@@ -174,6 +186,7 @@ def optimize_universal(
                 break
 
             epoch_loss += loss_val
+            per_question_losses.append(round(loss_val, 4))
 
         if nan_detected:
             logger.warning(f"  Epoch {epoch + 1}: NaN detected, stopping")
@@ -185,23 +198,64 @@ def optimize_universal(
         avg_loss = epoch_loss / total
         epoch_losses.append(avg_loss)
         epoch_time = time.time() - epoch_start
+
+        # Check accuracy after each epoch (adds ~2s × N questions but very informative)
+        epoch_correct = 0
+        for sample in samples:
+            question_text = benchmark.format_question(sample)
+            _, _, correct = _check_answer(
+                model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+            )
+            if correct:
+                epoch_correct += 1
+        epoch_acc = epoch_correct / total * 100
+        epoch_accuracies.append(epoch_acc)
+
         elapsed = time.time() - run_start
-        eta = (num_epochs - epoch - 1) * epoch_time
+        # Use elapsed / completed epochs for more accurate ETA
+        avg_epoch_time = elapsed / (epoch + 1)
+        eta = (num_epochs - epoch - 1) * avg_epoch_time
 
         logger.info(
-            f"  Epoch {epoch + 1}/{num_epochs}: avg_loss={avg_loss:.4f} "
+            f"  Epoch {epoch + 1}/{num_epochs}: avg_loss={avg_loss:.4f} acc={epoch_acc:.1f}% "
             f"| {epoch_time:.0f}s | ETA {eta / 60:.0f}min"
         )
 
-    opt_time = time.time() - run_start
-    logger.info(f"Universal optimization done in {opt_time:.0f}s. Evaluating accuracy...")
+        # Write epoch data in real-time
+        epoch_data = {
+            "epoch": epoch + 1,
+            "avg_loss": round(avg_loss, 4),
+            "accuracy": round(epoch_acc, 2),
+            "per_question_losses": per_question_losses,
+            "epoch_time_s": round(epoch_time, 1),
+        }
+        with open(epoch_log_file, "a") as f:
+            f.write(json.dumps(epoch_data) + "\n")
 
-    # Evaluate accuracy on all questions with the universal embeddings
+        # Save embedding checkpoint every 5 epochs
+        if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
+            torch.save(
+                [f.detach().cpu() for f in features],
+                os.path.join(tensors_dir, f"{benchmark.name}_universal_epoch{epoch + 1}.pt"),
+            )
+
+    opt_time = time.time() - run_start
+    logger.info(f"Universal optimization done in {opt_time:.0f}s. Final evaluation...")
+
+    # Final evaluation: detailed per-question results with the optimized embeddings
     correct_count = 0
     per_question_results = []
 
     for sample_idx, sample in enumerate(samples):
         question_text = benchmark.format_question(sample)
+
+        # Get per-question loss with final embeddings
+        with torch.no_grad(), encode_images_hook(model, features):
+            final_loss = compute_teacher_forcing_loss(
+                model, tokenizer, question_text, sample.ground_truth,
+                conv_mode=conv_mode,
+            ).item()
+
         response, prediction, correct = _check_answer(
             model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
         )
@@ -215,6 +269,7 @@ def optimize_universal(
             "prediction": prediction,
             "raw_response": response[:200],
             "correct": correct,
+            "final_loss": round(final_loss, 4),
         })
 
         if (sample_idx + 1) % 10 == 0:
@@ -223,9 +278,7 @@ def optimize_universal(
 
     accuracy = correct_count / total * 100 if total > 0 else 0
 
-    # Save universal embedding tensors
-    tensors_dir = os.path.join(results_dir, "tensors")
-    os.makedirs(tensors_dir, exist_ok=True)
+    # Save final universal embedding tensors
     torch.save(
         [f.detach().cpu() for f in features],
         os.path.join(tensors_dir, f"{benchmark.name}_universal.pt"),
@@ -246,6 +299,7 @@ def optimize_universal(
         "initial_avg_loss": round(epoch_losses[0], 4) if epoch_losses else 0,
         "final_avg_loss": round(epoch_losses[-1], 4) if epoch_losses else 0,
         "loss_curve": [round(l, 4) for l in epoch_losses],
+        "accuracy_curve": [round(a, 2) for a in epoch_accuracies],
         "optimization_time_s": round(opt_time, 1),
     }
 
@@ -345,12 +399,15 @@ def optimize_per_question(
         features = _init_features(shapes, device, dtype)
         optimizer = torch.optim.Adam(features, lr=lr)
 
-        # Measure initial loss (random embeddings)
+        # Measure initial loss and answer BEFORE optimization (random embeddings)
         with torch.no_grad(), encode_images_hook(model, features):
             initial_loss = compute_teacher_forcing_loss(
                 model, tokenizer, question_text, answer_text,
                 conv_mode=conv_mode,
             ).item()
+        initial_response, initial_prediction, initial_correct = _check_answer(
+            model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+        )
 
         # Optimization loop with per-step logging
         losses = []
@@ -405,10 +462,15 @@ def optimize_per_question(
             "question_id": sample.question_id,
             "question": sample.question[:200],
             "ground_truth": answer_text,
+            # Before optimization (random embeddings)
+            "initial_prediction": initial_prediction,
+            "initial_response": initial_response[:200],
+            "initial_correct": initial_correct,
+            "initial_loss": round(initial_loss, 4),
+            # After optimization
             "prediction": prediction,
             "raw_response": response[:200],
             "correct": correct,
-            "initial_loss": round(initial_loss, 4),
             "final_loss": round(final_loss, 4) if not nan_detected else None,
             "loss_reduction": round(initial_loss - final_loss, 4) if not nan_detected else None,
             "loss_curve": [round(l, 4) for l in losses],
