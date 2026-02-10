@@ -1,11 +1,16 @@
 """Scoring metrics for benchmark evaluation."""
 
-from collections import Counter
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 
+def _filter_errors(results: list[dict]) -> list[dict]:
+    """Exclude error samples from metric calculations."""
+    return [r for r in results if not r.get("error")]
+
+
 def compute_accuracy(results: list[dict]) -> float:
-    """Simple accuracy: fraction of correct predictions."""
+    """Simple accuracy: fraction of correct predictions (excluding errors)."""
+    results = _filter_errors(results)
     if not results:
         return 0.0
     correct = sum(1 for r in results if r["correct"])
@@ -14,6 +19,7 @@ def compute_accuracy(results: list[dict]) -> float:
 
 def compute_binary_metrics(results: list[dict]) -> dict[str, float]:
     """Accuracy, F1, precision, recall for binary (yes/no) tasks like POPE."""
+    results = _filter_errors(results)
     if not results:
         return {"accuracy": 0.0, "f1": 0.0, "precision": 0.0, "recall": 0.0, "yes_ratio": 0.0}
 
@@ -34,6 +40,7 @@ def compute_binary_metrics(results: list[dict]) -> dict[str, float]:
 
 def compute_vqa_accuracy(results: list[dict]) -> float:
     """VQA accuracy with soft matching against multiple annotator answers."""
+    results = _filter_errors(results)
     if not results:
         return 0.0
     total = 0.0

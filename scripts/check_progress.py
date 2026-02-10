@@ -69,10 +69,11 @@ def count_lines(path: Path) -> int:
 def get_run_stats(jsonl_path: Path) -> dict:
     """Get statistics from a JSONL results file."""
     if not jsonl_path.exists():
-        return {"done": 0, "correct": 0, "avg_ms": 0, "last_update": None}
+        return {"done": 0, "correct": 0, "errors": 0, "avg_ms": 0, "last_update": None}
 
     done = 0
     correct = 0
+    errors = 0
     total_ms = 0
     last_update = None
 
@@ -83,7 +84,9 @@ def get_run_stats(jsonl_path: Path) -> dict:
             try:
                 record = json.loads(line)
                 done += 1
-                if record.get("correct"):
+                if record.get("error"):
+                    errors += 1
+                elif record.get("correct"):
                     correct += 1
                 total_ms += record.get("inference_time_ms", 0)
             except json.JSONDecodeError:
@@ -93,10 +96,15 @@ def get_run_stats(jsonl_path: Path) -> dict:
     if done > 0:
         last_update = datetime.fromtimestamp(jsonl_path.stat().st_mtime)
 
+    # Accuracy excludes error samples
+    valid = done - errors
+
     return {
         "done": done,
         "correct": correct,
-        "avg_ms": total_ms / done if done > 0 else 0,
+        "errors": errors,
+        "valid": valid,
+        "avg_ms": total_ms / valid if valid > 0 else 0,
         "last_update": last_update,
     }
 
@@ -174,6 +182,7 @@ def print_progress(results_dir: str = "results"):
     total_done = 0
     total_expected = 0
     total_correct = 0
+    total_valid = 0
     active_runs = []
 
     for benchmark, condition in ALL_JOBS:
@@ -183,12 +192,14 @@ def print_progress(results_dir: str = "results"):
 
         stats = get_run_stats(jsonl_path)
         done = stats["done"]
+        valid = stats["valid"]
         total_done += done
         total_correct += stats["correct"]
+        total_valid += valid
 
         # Calculate progress
         pct = (done / expected * 100) if expected > 0 else 0
-        acc = (stats["correct"] / done * 100) if done > 0 else 0
+        acc = (stats["correct"] / valid * 100) if valid > 0 else 0
         avg_s = stats["avg_ms"] / 1000 if stats["avg_ms"] > 0 else 0
         remaining = expected - done
         eta_s = remaining * avg_s if avg_s > 0 else 0
@@ -219,7 +230,7 @@ def print_progress(results_dir: str = "results"):
 
     # Summary
     overall_pct = (total_done / total_expected * 100) if total_expected > 0 else 0
-    overall_acc = (total_correct / total_done * 100) if total_done > 0 else 0
+    overall_acc = (total_correct / total_valid * 100) if total_valid > 0 else 0
     print(f"  {'TOTAL':<12} {'':12} {total_done:>5}/{total_expected:<5} {overall_pct:>5.1f}% {overall_acc:>6.1f}%")
 
     # ETA for active runs
