@@ -32,10 +32,6 @@ BENCHMARK_SAMPLE_LIMITS = {
 # (they're bypassed by encode_images_hook) + gradient checkpointing.
 ALL_JOBS = [
     # (benchmark, condition, gpu_ids, load_8bit)
-    ("gqa", "normal", "0", False),
-    ("gqa", "no_image", "0", False),
-    ("gqa", "wrong_image", "0", False),
-    ("gqa", "gaussian_noise", "0", False),
     ("mmmu", "normal", "0", False),
     ("mmmu", "no_image", "0", False),
     ("mmmu", "wrong_image", "0", False),
@@ -52,10 +48,15 @@ ALL_JOBS = [
     ("textvqa", "no_image", "0", False),
     ("textvqa", "wrong_image", "0", False),
     ("textvqa", "gaussian_noise", "0", False),
-    ("scienceqa", "normal", "0", False),
-    ("scienceqa", "no_image", "0", False),
-    ("scienceqa", "wrong_image", "0", False),
-    ("scienceqa", "gaussian_noise", "0", False),
+    # Temporarily disabled — add back if needed:
+    # ("gqa", "normal", "0", False),
+    # ("gqa", "no_image", "0", False),
+    # ("gqa", "wrong_image", "0", False),
+    # ("gqa", "gaussian_noise", "0", False),
+    # ("scienceqa", "normal", "0", False),
+    # ("scienceqa", "no_image", "0", False),
+    # ("scienceqa", "wrong_image", "0", False),
+    # ("scienceqa", "gaussian_noise", "0", False),
 ]
 
 

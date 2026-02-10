@@ -22,20 +22,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EXPECTED_SAMPLES = {
     "mmmu": 900,
     "mmbench": 3000,
-    "scienceqa": 2000,
     "pope": 3000,
     "textvqa": 3000,
-    "gqa": 5000,
+    # Temporarily disabled — add back if needed:
+    # "gqa": 5000,
+    # "scienceqa": 2000,
 }
 
 # All planned runs
 ALL_JOBS = [
     ("mmmu", "normal"), ("mmmu", "no_image"), ("mmmu", "wrong_image"), ("mmmu", "gaussian_noise"),
     ("mmbench", "normal"), ("mmbench", "no_image"), ("mmbench", "wrong_image"), ("mmbench", "gaussian_noise"),
-    ("scienceqa", "normal"), ("scienceqa", "no_image"), ("scienceqa", "wrong_image"), ("scienceqa", "gaussian_noise"),
     ("pope", "normal"), ("pope", "no_image"), ("pope", "wrong_image"), ("pope", "gaussian_noise"),
     ("textvqa", "normal"), ("textvqa", "no_image"), ("textvqa", "wrong_image"), ("textvqa", "gaussian_noise"),
-    ("gqa", "normal"), ("gqa", "no_image"), ("gqa", "wrong_image"), ("gqa", "gaussian_noise"),
+    # Temporarily disabled — add back if needed:
+    # ("gqa", "normal"), ("gqa", "no_image"), ("gqa", "wrong_image"), ("gqa", "gaussian_noise"),
+    # ("scienceqa", "normal"), ("scienceqa", "no_image"), ("scienceqa", "wrong_image"), ("scienceqa", "gaussian_noise"),
 ]
 
 CONDITION_NAMES = {
