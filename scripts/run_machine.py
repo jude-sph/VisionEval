@@ -33,26 +33,26 @@ MACHINE_B_JOBS = [
     ("mmmu", "gaussian_noise", "0", False),
 ]
 
-MACHINE_A_INSTANCE_1 = [
-    ("mmbench", "normal", "0,1", True),
-    ("mmbench", "no_image", "0,1", True),
-    ("mmbench", "wrong_image", "0,1", True),
-    ("mmbench", "gaussian_noise", "0,1", True),
-    ("pope", "normal", "0,1", True),
-    ("pope", "no_image", "0,1", True),
-    ("pope", "wrong_image", "0,1", True),
-    ("pope", "gaussian_noise", "0,1", True),
-]
-
-MACHINE_A_INSTANCE_2 = [
-    ("textvqa", "normal", "2,3", True),
-    ("textvqa", "no_image", "2,3", True),
-    ("textvqa", "wrong_image", "2,3", True),
-    ("textvqa", "gaussian_noise", "2,3", True),
-    ("scienceqa", "normal", "2,3", True),
-    ("scienceqa", "no_image", "2,3", True),
-    ("scienceqa", "wrong_image", "2,3", True),
-    ("scienceqa", "gaussian_noise", "2,3", True),
+# Fallback: INT8 failed on Pascal (compute 6.1), use FP16 across all 4 GPUs
+# Single instance, sequential jobs (can't split — all 4 GPUs needed for one model)
+MACHINE_A_JOBS = [
+    # (benchmark, condition, gpu_ids, load_8bit)
+    ("mmbench", "normal", "0,1,2,3", False),
+    ("mmbench", "no_image", "0,1,2,3", False),
+    ("mmbench", "wrong_image", "0,1,2,3", False),
+    ("mmbench", "gaussian_noise", "0,1,2,3", False),
+    ("pope", "normal", "0,1,2,3", False),
+    ("pope", "no_image", "0,1,2,3", False),
+    ("pope", "wrong_image", "0,1,2,3", False),
+    ("pope", "gaussian_noise", "0,1,2,3", False),
+    ("textvqa", "normal", "0,1,2,3", False),
+    ("textvqa", "no_image", "0,1,2,3", False),
+    ("textvqa", "wrong_image", "0,1,2,3", False),
+    ("textvqa", "gaussian_noise", "0,1,2,3", False),
+    ("scienceqa", "normal", "0,1,2,3", False),
+    ("scienceqa", "no_image", "0,1,2,3", False),
+    ("scienceqa", "wrong_image", "0,1,2,3", False),
+    ("scienceqa", "gaussian_noise", "0,1,2,3", False),
 ]
 
 
@@ -86,7 +86,7 @@ def prompt_machine() -> str:
     print()
     print("  A) Machine A — 4x Titan X Pascal (compute 6.1)")
     print("     Runs: MMBench, POPE, TextVQA, ScienceQA")
-    print("     Config: INT8, 2 GPUs per instance, 2 parallel instances")
+    print("     Config: FP16, 4-way tensor parallel, 1 instance")
     print()
     print("  B) Machine B — 1x RTX 3090 (+ unusable Titan X Maxwell)")
     print("     Runs: GQA, MMMU")
@@ -152,60 +152,13 @@ def main(
         run_jobs_sequential(jobs, max_samples)
 
     elif machine == "A":
-        logger.info(f"Machine A (Pascal): launching 2 parallel instances")
+        jobs = MACHINE_A_JOBS
+        logger.info(f"Machine A (Pascal): {len(jobs)} jobs, 4-way FP16 tensor parallel")
         if dry_run:
-            print("Instance 1:")
-            for b, c, g, q in MACHINE_A_INSTANCE_1:
-                print(f"  {b}/{c} on GPUs {g} (INT8={q})")
-            print("Instance 2:")
-            for b, c, g, q in MACHINE_A_INSTANCE_2:
+            for b, c, g, q in jobs:
                 print(f"  {b}/{c} on GPUs {g} (INT8={q})")
             return
-
-        # Launch two instances in parallel using subprocess
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_single.py")
-        cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        processes = []
-
-        for instance_name, jobs in [("Instance 1", MACHINE_A_INSTANCE_1), ("Instance 2", MACHINE_A_INSTANCE_2)]:
-            for benchmark, condition, gpu_ids, load_8bit in jobs:
-                cmd = [
-                    sys.executable, script,
-                    "--benchmark", benchmark,
-                    "--condition", condition,
-                    "--gpu_ids", gpu_ids,
-                ]
-                if load_8bit:
-                    cmd.append("--load_8bit")
-                if max_samples:
-                    cmd.extend(["--max_samples", str(max_samples)])
-                processes.append((instance_name, benchmark, condition, cmd, cwd))
-
-        # Run instance 1 and instance 2 jobs interleaved to balance GPU usage
-        # Each instance's jobs run sequentially within the instance,
-        # but the two instances run in parallel
-        import concurrent.futures
-
-        def run_instance(instance_jobs):
-            for inst_name, bench, cond, cmd, wd in instance_jobs:
-                logger.info(f"[{inst_name}] Starting: {bench}/{cond}")
-                result = subprocess.run(cmd, cwd=wd)
-                if result.returncode != 0:
-                    logger.error(f"[{inst_name}] Failed: {bench}/{cond}")
-                else:
-                    logger.info(f"[{inst_name}] Completed: {bench}/{cond}")
-
-        # Split processes back into two instance groups
-        inst1_procs = [(n, b, c, cmd, wd) for n, b, c, cmd, wd in processes if n == "Instance 1"]
-        inst2_procs = [(n, b, c, cmd, wd) for n, b, c, cmd, wd in processes if n == "Instance 2"]
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            f1 = executor.submit(run_instance, inst1_procs)
-            f2 = executor.submit(run_instance, inst2_procs)
-            f1.result()
-            f2.result()
-
-        logger.info("All Machine A jobs completed")
+        run_jobs_sequential(jobs, max_samples)
     else:
         logger.error(f"Unknown machine: {machine}. Use --machine A or --machine B")
         sys.exit(1)
