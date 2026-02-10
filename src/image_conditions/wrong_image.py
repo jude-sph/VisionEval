@@ -32,6 +32,9 @@ class WrongImageCondition(ImageCondition):
         if current_idx is not None and wrong_idx >= current_idx:
             wrong_idx += 1
 
+        # Store for metadata collection by the runner
+        self.last_wrong_idx = wrong_idx
+
         # Extract image from the dataset row
         wrong_sample = dataset_images[wrong_idx]
         wrong_image = None

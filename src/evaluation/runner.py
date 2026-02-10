@@ -1,5 +1,6 @@
 """Main evaluation runner: iterates over benchmark x condition pairs."""
 
+import math
 import time
 import logging
 from typing import Optional
@@ -75,7 +76,7 @@ def run_evaluation(
 
         # Run inference
         start_time = time.time()
-        raw_response = run_inference(
+        inference_result = run_inference(
             model=model,
             tokenizer=tokenizer,
             image_processor=image_processor,
@@ -85,6 +86,7 @@ def run_evaluation(
             max_new_tokens=max_new_tokens,
         )
         inference_ms = (time.time() - start_time) * 1000
+        raw_response = inference_result["response"]
 
         # Extract and score answer
         prediction = benchmark.extract_answer(raw_response, sample)
@@ -100,7 +102,67 @@ def run_evaluation(
             "ground_truth": sample.ground_truth,
             "correct": correct,
             "inference_time_ms": round(inference_ms, 1),
+            # Response-level logprob stats
+            "response_logprob": inference_result.get("response_logprob"),
+            "response_perplexity": inference_result.get("response_perplexity"),
+            "num_generated_tokens": inference_result.get("num_generated_tokens"),
+            "response_char_length": len(raw_response),
+            # Metadata from benchmark
+            "subject": (sample.metadata.get("subject", "") if sample.metadata else ""),
+            "category": (sample.metadata.get("category", "") if sample.metadata else ""),
+            "num_choices": len(sample.choices) if sample.choices else None,
+            # Prompt info
+            "prompt_token_count": inference_result.get("prompt_token_count"),
+            # Image info
+            "image_width": sample.image.size[0] if sample.image else None,
+            "image_height": sample.image.size[1] if sample.image else None,
         }
+
+        # Answer option probabilities (MCQ or binary)
+        first_token_probs = inference_result.get("first_token_probs", {})
+        if sample.choices:
+            # MCQ: A, B, C, D
+            answer_probs = {}
+            answer_logprobs = {}
+            letters = [chr(65 + i) for i in range(len(sample.choices))]
+            for letter in letters:
+                if letter in first_token_probs:
+                    answer_probs[letter] = first_token_probs[letter]["prob"]
+                    answer_logprobs[letter] = first_token_probs[letter]["logprob"]
+            result["answer_probs"] = answer_probs
+            result["answer_logprobs"] = answer_logprobs
+        elif benchmark.scoring_method == "binary_accuracy_f1":
+            # Binary: yes/no
+            answer_probs = {}
+            answer_logprobs = {}
+            for word in ["yes", "no"]:
+                if word in first_token_probs:
+                    answer_probs[word] = first_token_probs[word]["prob"]
+                    answer_logprobs[word] = first_token_probs[word]["logprob"]
+            result["answer_probs"] = answer_probs
+            result["answer_logprobs"] = answer_logprobs
+
+        # Derived confidence metrics
+        if result.get("answer_probs"):
+            probs = result["answer_probs"]
+            sorted_probs = sorted(probs.values(), reverse=True)
+            # Confidence = P(predicted answer)
+            pred_key = prediction.upper() if sample.choices else prediction.lower()
+            result["confidence"] = round(probs.get(pred_key, 0.0), 6)
+            # Ground truth probability and rank
+            gt_key = sample.ground_truth.upper().strip() if sample.choices else sample.ground_truth.lower().strip()
+            result["gt_prob"] = round(probs.get(gt_key, 0.0), 6)
+            sorted_keys = sorted(probs.keys(), key=lambda k: probs[k], reverse=True)
+            result["gt_rank"] = (sorted_keys.index(gt_key) + 1) if gt_key in sorted_keys else len(probs) + 1
+            # Margin = P(top1) - P(top2)
+            result["margin"] = round(sorted_probs[0] - sorted_probs[1], 6) if len(sorted_probs) >= 2 else round(sorted_probs[0], 6)
+            # Entropy over answer option probs
+            entropy = -sum(p * math.log(p + 1e-10) for p in probs.values())
+            result["entropy"] = round(entropy, 4)
+
+        # Wrong image index
+        if condition.name == "wrong_image" and hasattr(condition, "last_wrong_idx"):
+            result["wrong_image_idx"] = condition.last_wrong_idx
 
         # Include extra metadata for VQA accuracy
         if sample.metadata and "all_answers" in sample.metadata:
