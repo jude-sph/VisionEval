@@ -75,3 +75,31 @@ def get_encoder_output_shapes(
     shapes = [f.shape for f in features]
     logger.info(f"Encoder output shapes: {shapes}")
     return shapes
+
+
+@contextmanager
+def enable_vision_grad(model):
+    """Enable gradient flow through vision encoders.
+
+    Cambrian's vision towers wrap their forward pass in
+    torch.set_grad_enabled(self.unfreeze_mm_vision_tower).
+    This context manager sets that flag to True on all towers,
+    then restores the original values on exit.
+
+    Args:
+        model: The Cambrian model.
+    """
+    inner = getattr(model, "model", model)
+    towers = getattr(inner, "vision_tower_aux_list", []) or []
+
+    # Save original values
+    original_flags = []
+    for tower in towers:
+        original_flags.append(getattr(tower, "unfreeze_mm_vision_tower", False))
+        tower.unfreeze_mm_vision_tower = True
+
+    try:
+        yield
+    finally:
+        for tower, flag in zip(towers, original_flags):
+            tower.unfreeze_mm_vision_tower = flag

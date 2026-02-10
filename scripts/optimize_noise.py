@@ -1,20 +1,27 @@
-"""Optimize noise embeddings to maximize benchmark accuracy.
+"""Optimize noise embeddings/pixels to maximize benchmark accuracy.
 
-Finds embedding-space inputs that maximize P(correct answer) for Cambrian-8B,
+Finds inputs that maximize P(correct answer) for Cambrian-8B,
 without using any real images.
 
+Embedding modes optimize encoder output tensors (bypassing vision encoders).
+Pixel modes optimize raw pixel values through the real vision encoders,
+producing visible noise images.
+
 Usage:
-    # Both modes (universal first, then per-question) — default
+    # Embedding optimization (both universal + per-question) — default
     python scripts/optimize_noise.py --benchmark mmmu --max_samples 50
 
-    # Universal only
-    python scripts/optimize_noise.py --mode universal --num_epochs 10
+    # Pixel optimization (both universal + per-question)
+    python scripts/optimize_noise.py --mode pixel_both --max_samples 50
 
-    # Per-question only
-    python scripts/optimize_noise.py --mode per_question --num_steps 20
+    # All modes (embedding + pixel)
+    python scripts/optimize_noise.py --mode all --max_samples 50
+
+    # Pixel per-question only
+    python scripts/optimize_noise.py --mode pixel_per_question --pixel_steps 20
 
     # Smoke test
-    python scripts/optimize_noise.py --max_samples 1 --mode per_question --num_steps 5
+    python scripts/optimize_noise.py --max_samples 1 --mode pixel_per_question --pixel_steps 5
 """
 
 import os
@@ -35,20 +42,34 @@ def main(
     num_steps: int = 20,
     num_epochs: int = 10,
     lr: float = 0.001,
+    pixel_steps: int = 20,
+    pixel_epochs: int = 10,
+    pixel_lr: float = 0.01,
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
 ):
-    """Run embedding-space noise optimization on a benchmark.
+    """Run noise optimization on a benchmark.
 
     Args:
         benchmark: Benchmark name (mmmu, pope, etc.).
         gpu_ids: Comma-separated GPU indices (default: 0,1,2,3 for 4x Titan X Pascal).
         max_samples: Number of questions to optimize.
-        mode: 'universal', 'per_question', or 'both' (universal first, then per-question).
-        num_steps: Gradient descent steps per question (per-question mode).
-        num_epochs: Number of epochs (universal mode).
-        lr: Adam learning rate for optimization.
+        mode: Optimization mode:
+            'universal'        - Embedding universal only
+            'per_question'     - Embedding per-question only
+            'both'             - Embedding universal + per-question (default)
+            'pixel_universal'  - Pixel universal only
+            'pixel_per_question' - Pixel per-question only
+            'pixel_both'       - Pixel universal + per-question
+            'all'              - All four modes (embedding both + pixel both)
+        num_steps: Gradient descent steps per question (embedding per-question).
+        num_epochs: Number of epochs (embedding universal).
+        lr: Adam learning rate for embedding optimization.
+        pixel_steps: Gradient descent steps per question (pixel per-question).
+        pixel_epochs: Number of epochs (pixel universal).
+        pixel_lr: Adam learning rate for pixel optimization (higher default
+            because gradients attenuate through vision encoders).
         model_path: HuggingFace model path.
         conv_mode: Conversation template.
         results_dir: Directory for optimization results.
@@ -75,15 +96,24 @@ def main(
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     remapped_gpus = list(range(len(gpu_list)))
 
+    # Determine which phases to run
+    run_emb_universal = mode in ("universal", "both", "all")
+    run_emb_per_q = mode in ("per_question", "both", "all")
+    run_pix_universal = mode in ("pixel_universal", "pixel_both", "all")
+    run_pix_per_q = mode in ("pixel_per_question", "pixel_both", "all")
+
     logger.info(f"Benchmark: {benchmark}")
     logger.info(f"Mode: {mode}")
     logger.info(f"GPUs: {gpu_list} (remapped to {remapped_gpus})")
     logger.info(f"Max samples: {max_samples}")
-    if mode in ("universal", "both"):
-        logger.info(f"Universal epochs: {num_epochs}")
-    if mode in ("per_question", "both"):
-        logger.info(f"Per-question steps: {num_steps}")
-    logger.info(f"Learning rate: {lr}")
+    if run_emb_universal:
+        logger.info(f"Embedding universal: {num_epochs} epochs, lr={lr}")
+    if run_emb_per_q:
+        logger.info(f"Embedding per-question: {num_steps} steps, lr={lr}")
+    if run_pix_universal:
+        logger.info(f"Pixel universal: {pixel_epochs} epochs, lr={pixel_lr}")
+    if run_pix_per_q:
+        logger.info(f"Pixel per-question: {pixel_steps} steps, lr={pixel_lr}")
 
     # Load model
     from src.model.loader import load_cambrian
@@ -101,43 +131,96 @@ def main(
     bench = get_benchmark(benchmark)
     bench.load(max_samples=max_samples)
 
-    # Run optimization(s)
-    from src.optimization.embedding_optimizer import optimize_universal, optimize_per_question
+    # === EMBEDDING OPTIMIZATION ===
+    if run_emb_universal or run_emb_per_q:
+        from src.optimization.embedding_optimizer import optimize_universal, optimize_per_question
 
-    if mode in ("universal", "both"):
-        logger.info("=" * 60)
-        logger.info("PHASE 1: Universal embedding optimization")
-        logger.info("=" * 60)
-        universal_summary = optimize_universal(
-            model=model,
-            tokenizer=tokenizer,
-            image_processor=image_processor,
-            benchmark=bench,
-            max_samples=max_samples,
-            num_epochs=num_epochs,
-            lr=lr,
-            conv_mode=conv_mode,
-            results_dir=results_dir,
-        )
-        logger.info(f"Universal results: {universal_summary}")
+        if run_emb_universal:
+            logger.info("=" * 60)
+            logger.info("PHASE: Embedding universal optimization")
+            logger.info("=" * 60)
+            universal_summary = optimize_universal(
+                model=model,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                benchmark=bench,
+                max_samples=max_samples,
+                num_epochs=num_epochs,
+                lr=lr,
+                conv_mode=conv_mode,
+                results_dir=results_dir,
+            )
+            logger.info(f"Embedding universal results: {universal_summary}")
 
-    if mode in ("per_question", "both"):
-        logger.info("=" * 60)
-        logger.info("PHASE 2: Per-question embedding optimization")
-        logger.info("=" * 60)
-        per_q_summary = optimize_per_question(
-            model=model,
-            tokenizer=tokenizer,
-            image_processor=image_processor,
-            benchmark=bench,
-            max_samples=max_samples,
-            num_steps=num_steps,
-            lr=lr,
-            conv_mode=conv_mode,
-            results_dir=results_dir,
-            _skip_setup=mode == "both",  # already set up by universal
-        )
-        logger.info(f"Per-question results: {per_q_summary}")
+        if run_emb_per_q:
+            logger.info("=" * 60)
+            logger.info("PHASE: Embedding per-question optimization")
+            logger.info("=" * 60)
+            per_q_summary = optimize_per_question(
+                model=model,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                benchmark=bench,
+                max_samples=max_samples,
+                num_steps=num_steps,
+                lr=lr,
+                conv_mode=conv_mode,
+                results_dir=results_dir,
+                _skip_setup=run_emb_universal,
+            )
+            logger.info(f"Embedding per-question results: {per_q_summary}")
+
+    # === PIXEL OPTIMIZATION ===
+    if run_pix_universal or run_pix_per_q:
+        from src.optimization.pixel_optimizer import optimize_pixel_universal, optimize_pixel_per_question
+
+        # Vision encoders need to be back on GPU for pixel optimization.
+        # If embedding optimization offloaded them, move them back.
+        if run_emb_universal or run_emb_per_q:
+            inner = getattr(model, "model", model)
+            towers = getattr(inner, "vision_tower_aux_list", None)
+            if towers:
+                device = next(model.parameters()).device
+                for tower in towers:
+                    tower.to(device)
+                logger.info(f"Moved {len(towers)} vision encoders back to GPU")
+                import torch
+                torch.cuda.empty_cache()
+
+        if run_pix_universal:
+            logger.info("=" * 60)
+            logger.info("PHASE: Pixel universal optimization")
+            logger.info("=" * 60)
+            pix_universal_summary = optimize_pixel_universal(
+                model=model,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                benchmark=bench,
+                max_samples=max_samples,
+                num_epochs=pixel_epochs,
+                lr=pixel_lr,
+                conv_mode=conv_mode,
+                results_dir=results_dir,
+            )
+            logger.info(f"Pixel universal results: {pix_universal_summary}")
+
+        if run_pix_per_q:
+            logger.info("=" * 60)
+            logger.info("PHASE: Pixel per-question optimization")
+            logger.info("=" * 60)
+            pix_per_q_summary = optimize_pixel_per_question(
+                model=model,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                benchmark=bench,
+                max_samples=max_samples,
+                num_steps=pixel_steps,
+                lr=pixel_lr,
+                conv_mode=conv_mode,
+                results_dir=results_dir,
+                _skip_setup=run_pix_universal,
+            )
+            logger.info(f"Pixel per-question results: {pix_per_q_summary}")
 
     logger.info("All optimization complete!")
 
