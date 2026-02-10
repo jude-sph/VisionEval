@@ -32,13 +32,18 @@ class WrongImageCondition(ImageCondition):
         if current_idx is not None and wrong_idx >= current_idx:
             wrong_idx += 1
 
-        # Extract image from the dataset
+        # Extract image from the dataset row
         wrong_sample = dataset_images[wrong_idx]
+        wrong_image = None
         if isinstance(wrong_sample, dict):
-            wrong_image = wrong_sample.get("image", wrong_sample.get("img"))
+            # Try common image field names across benchmarks
+            for key in ["image", "img", "image_1", "image_2", "image_3",
+                         "image_4", "image_5", "image_6", "image_7"]:
+                val = wrong_sample.get(key)
+                if val is not None and isinstance(val, Image.Image):
+                    wrong_image = val
+                    break
         elif isinstance(wrong_sample, Image.Image):
-            wrong_image = wrong_sample
-        else:
             wrong_image = wrong_sample
 
         if isinstance(wrong_image, Image.Image):
