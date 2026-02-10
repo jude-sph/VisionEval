@@ -9,7 +9,6 @@ import os
 import time
 import logging
 import torch
-from tqdm import tqdm
 
 from src.benchmarks.base import Benchmark, BenchmarkSample
 from src.optimization.utils import encode_images_hook, get_encoder_output_shapes
@@ -50,7 +49,7 @@ def optimize_per_question(
       1. Initialize 4 random feature tensors
       2. Run num_steps of gradient descent to minimize teacher-forcing loss
       3. After optimization, check if the model now answers correctly
-      4. Record results
+      4. Record results (written to JSONL in real-time)
 
     Args:
         model: Loaded Cambrian model.
@@ -79,14 +78,42 @@ def optimize_per_question(
         logger.info("Gradient checkpointing enabled")
 
     results = []
-    correct_before = 0
     correct_after = 0
 
     samples = list(benchmark)
     if max_samples:
         samples = samples[:max_samples]
 
-    for sample_idx, sample in enumerate(tqdm(samples, desc="Optimizing embeddings")):
+    # JSONL file for real-time results (append mode)
+    results_file = os.path.join(results_dir, f"{benchmark.name}_optimized_embeddings.jsonl")
+
+    # Check for existing results (checkpoint/resume)
+    completed_ids = set()
+    if os.path.exists(results_file):
+        with open(results_file) as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        r = json.loads(line)
+                        completed_ids.add(r["question_id"])
+                        results.append(r)
+                        if r.get("correct"):
+                            correct_after += 1
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+        if completed_ids:
+            logger.info(f"Resuming: {len(completed_ids)} questions already done")
+
+    total = len(samples)
+    run_start = time.time()
+
+    logger.info(f"Starting optimization: {total} questions, {num_steps} steps each, lr={lr}")
+    logger.info(f"Results file: {results_file}")
+
+    for sample_idx, sample in enumerate(samples):
+        if sample.question_id in completed_ids:
+            continue
+
         question_text = benchmark.format_question(sample)
         answer_text = sample.ground_truth
 
@@ -94,16 +121,14 @@ def optimize_per_question(
         features = _init_features(shapes, device, dtype)
         optimizer = torch.optim.Adam(features, lr=lr)
 
-        # Check accuracy BEFORE optimization (random embeddings)
+        # Measure initial loss (random embeddings)
         with torch.no_grad(), encode_images_hook(model, features):
-            from src.model.inference import run_inference, build_prompt
-            # Quick check: compute loss at initialization
             initial_loss = compute_teacher_forcing_loss(
                 model, tokenizer, question_text, answer_text,
                 conv_mode=conv_mode,
             ).item()
 
-        # Optimization loop
+        # Optimization loop with per-step logging
         losses = []
         start_time = time.time()
 
@@ -120,14 +145,18 @@ def optimize_per_question(
             optimizer.step()
             losses.append(loss.item())
 
+            # Log every 10 steps within a question
+            if (step + 1) % 10 == 0:
+                logger.info(
+                    f"  Q{sample_idx + 1}/{total} step {step + 1}/{num_steps}: "
+                    f"loss {losses[-1]:.4f} (started at {initial_loss:.4f})"
+                )
+
         opt_time = time.time() - start_time
 
         # Check accuracy AFTER optimization: generate an answer
         with torch.no_grad(), encode_images_hook(model, features):
-            # Use model.generate to get actual answer
             from src.model.inference import run_inference
-            # We need to bypass the normal image processing since we're
-            # injecting features directly. Create a dummy 384x384 image.
             from PIL import Image
             dummy_image = Image.new("RGB", (384, 384), color=(128, 128, 128))
             response = run_inference(
@@ -160,23 +189,29 @@ def optimize_per_question(
         }
         results.append(result)
 
-        if (sample_idx + 1) % 10 == 0:
-            acc = correct_after / (sample_idx + 1) * 100
-            logger.info(
-                f"Progress: {sample_idx + 1}/{len(samples)}, "
-                f"optimized_acc={acc:.1f}%, "
-                f"avg_loss_reduction={sum(r['loss_reduction'] for r in results) / len(results):.3f}"
-            )
+        # Write result immediately (real-time progress)
+        with open(results_file, "a") as f:
+            f.write(json.dumps(result) + "\n")
+
+        # Per-question summary log
+        done = len(results)
+        acc = correct_after / done * 100
+        elapsed = time.time() - run_start
+        remaining = total - done
+        avg_time = elapsed / (done - len(completed_ids)) if done > len(completed_ids) else 0
+        eta = remaining * avg_time
+
+        status = "CORRECT" if correct else "WRONG"
+        logger.info(
+            f"[{done}/{total}] {sample.question_id}: {status} "
+            f"(pred={prediction}, gt={answer_text}) "
+            f"loss {initial_loss:.3f}->{losses[-1]:.3f} "
+            f"| acc={acc:.1f}% | {opt_time:.1f}s | ETA {eta / 60:.0f}min"
+        )
 
     # Disable gradient checkpointing after optimization
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
-
-    # Save per-question results
-    results_file = os.path.join(results_dir, f"{benchmark.name}_optimized_embeddings.jsonl")
-    with open(results_file, "w") as f:
-        for r in results:
-            f.write(json.dumps(r) + "\n")
 
     # Summary
     accuracy = correct_after / len(results) * 100 if results else 0
