@@ -238,11 +238,20 @@ def optimize_per_question(
             "initial_loss": round(initial_loss, 4),
             "final_loss": round(final_loss, 4) if not nan_detected else None,
             "loss_reduction": round(initial_loss - final_loss, 4) if not nan_detected else None,
+            "loss_curve": [round(l, 4) for l in losses],
             "optimization_time_s": round(opt_time, 1),
             "num_steps": len(losses),
             "nan_detected": nan_detected,
         }
         results.append(result)
+
+        # Save optimized embedding tensors (for later inversion / analysis)
+        tensors_dir = os.path.join(results_dir, "tensors")
+        os.makedirs(tensors_dir, exist_ok=True)
+        torch.save(
+            [f.detach().cpu() for f in features],
+            os.path.join(tensors_dir, f"{sample.question_id}.pt"),
+        )
 
         # Write result immediately (real-time progress)
         with open(results_file, "a") as f:
