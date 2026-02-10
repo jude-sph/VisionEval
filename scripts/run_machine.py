@@ -20,6 +20,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_machine")
 
+# Per-benchmark sample limits (None = use full dataset)
+# GQA has ~12k instructions but we cap at 5000 for consistent timing/stats
+BENCHMARK_SAMPLE_LIMITS = {
+    "gqa": 5000,
+}
+
 # All benchmarks run on single GPU (3090 FP16) — multi-GPU tensor parallel
 # is incompatible with Cambrian's multi-encoder architecture
 ALL_JOBS = [
@@ -64,8 +70,11 @@ def run_jobs_sequential(jobs: list[tuple], max_samples: int | None = None):
         ]
         if load_8bit:
             cmd.append("--load_8bit")
-        if max_samples:
-            cmd.extend(["--max_samples", str(max_samples)])
+
+        # Use CLI override, or per-benchmark limit, or no limit
+        effective_max = max_samples or BENCHMARK_SAMPLE_LIMITS.get(benchmark)
+        if effective_max:
+            cmd.extend(["--max_samples", str(effective_max)])
 
         logger.info(f"Starting: {benchmark}/{condition} on GPUs {gpu_ids}")
         result = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
