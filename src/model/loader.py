@@ -51,7 +51,9 @@ def load_cambrian(
         max_memory[gpu_ids[0]] = "7GiB"
         max_memory["cpu"] = "16GiB"
         kwargs["max_memory"] = max_memory
-    elif gpu_ids is not None and len(gpu_ids) == 1:
+    elif gpu_ids is not None and len(gpu_ids) == 1 and not load_8bit:
+        # Direct device placement — only works without quantization.
+        # bitsandbytes quantized models can't be .to(device), so use "auto".
         kwargs["device_map"] = {"": gpu_ids[0]}
     else:
         kwargs["device_map"] = "auto"
