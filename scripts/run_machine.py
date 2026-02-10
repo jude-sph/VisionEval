@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 import logging
+from pathlib import Path
 import fire
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +25,16 @@ logger = logging.getLogger("run_machine")
 # GQA has ~12k instructions but we cap at 5000 for consistent timing/stats
 BENCHMARK_SAMPLE_LIMITS = {
     "gqa": 5000,
+}
+
+# Expected sample counts per benchmark (full dataset sizes)
+EXPECTED_SAMPLES = {
+    "mmmu": 900,
+    "mmbench": 4329,
+    "pope": 9000,
+    "textvqa": 3000,
+    "gqa": 5000,
+    "scienceqa": 2000,
 }
 
 # All benchmarks + noise optimization run FP16 on single GPU (3090).
@@ -60,11 +71,33 @@ ALL_JOBS = [
 ]
 
 
-def run_jobs_sequential(jobs: list[tuple], max_samples: int | None = None):
+def _count_results(results_dir: str, benchmark: str, condition: str) -> int:
+    """Count completed results in JSONL file without loading into memory."""
+    path = Path(results_dir) / "raw" / f"{benchmark}_{condition}.jsonl"
+    if not path.exists():
+        return 0
+    count = 0
+    with open(path, "rb") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
+def run_jobs_sequential(jobs: list[tuple], max_samples: int | None = None, results_dir: str = "results"):
     """Run a list of (benchmark, condition, gpu_ids, load_8bit) jobs sequentially."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_single.py")
 
     for benchmark, condition, gpu_ids, load_8bit in jobs:
+        # Check if this job is already complete before loading the model
+        effective_max = max_samples or BENCHMARK_SAMPLE_LIMITS.get(benchmark)
+        expected = effective_max or EXPECTED_SAMPLES.get(benchmark, 0)
+        if expected > 0:
+            done = _count_results(results_dir, benchmark, condition)
+            if done >= expected:
+                logger.info(f"Skipping: {benchmark}/{condition} — already complete ({done}/{expected})")
+                continue
+
         cmd = [
             sys.executable, script,
             "--benchmark", benchmark,
@@ -74,8 +107,6 @@ def run_jobs_sequential(jobs: list[tuple], max_samples: int | None = None):
         if load_8bit:
             cmd.append("--load_8bit")
 
-        # Use CLI override, or per-benchmark limit, or no limit
-        effective_max = max_samples or BENCHMARK_SAMPLE_LIMITS.get(benchmark)
         if effective_max:
             cmd.extend(["--max_samples", str(effective_max)])
 
@@ -90,22 +121,28 @@ def run_jobs_sequential(jobs: list[tuple], max_samples: int | None = None):
 def main(
     max_samples: int | None = None,
     dry_run: bool = False,
+    results_dir: str = "results",
 ):
     """Run all evaluation jobs sequentially on single GPU.
 
     Args:
         max_samples: Limit samples per benchmark (for testing).
         dry_run: Print jobs without running them.
+        results_dir: Directory for results.
     """
     jobs = ALL_JOBS
     logger.info(f"Running {len(jobs)} jobs sequentially on single GPU FP16")
 
     if dry_run:
         for b, c, g, q in jobs:
-            print(f"  {b}/{c} on GPU {g} (INT8={q})")
+            effective_max = max_samples or BENCHMARK_SAMPLE_LIMITS.get(b)
+            expected = effective_max or EXPECTED_SAMPLES.get(b, 0)
+            done = _count_results(results_dir, b, c)
+            skip = " [SKIP — complete]" if expected > 0 and done >= expected else ""
+            print(f"  {b}/{c} on GPU {g} (INT8={q}) ({done}/{expected}){skip}")
         return
 
-    run_jobs_sequential(jobs, max_samples)
+    run_jobs_sequential(jobs, max_samples, results_dir)
     logger.info("All evaluation jobs completed!")
 
 
