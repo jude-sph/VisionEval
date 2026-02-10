@@ -30,11 +30,13 @@ from src.optimization.differentiable_preprocess import (
 
 logger = logging.getLogger(__name__)
 
-# ConvNeXt (encoder index 3) takes 1024x1024 input and produces 9216 tokens.
-# Its backward pass stores massive intermediate activations that OOM on 12GB GPUs.
-# We detach its preprocessed input so it still contributes to the forward pass
-# but gradients only flow through the other 3 encoders (SigLIP, CLIP, DINOv2).
-CONVNEXT_INDEX = 3
+# On 12GB GPUs (Titan X Pascal), only ~1.2GB is free on GPU 0 after loading
+# the model (7GB LLM layers + 3.8GB vision encoders). Backward activations
+# through multiple vision encoders exceed this budget. We only backprop through
+# SigLIP (encoder 0, 384x384, ~200-500MB backward) and detach the rest.
+# All 4 encoders still run in the forward pass — only gradient flow is limited.
+GRAD_ENCODER_INDEX = 0  # SigLIP — backprop through this one
+DETACH_ENCODER_INDICES = [1, 2, 3]  # CLIP, DINOv2, ConvNeXt — forward only
 
 
 def _init_pixels(
@@ -177,7 +179,7 @@ def optimize_pixel_universal(
     run_start = time.time()
 
     logger.info(f"Starting PIXEL UNIVERSAL optimization: {total} questions, {num_epochs} epochs, lr={lr}")
-    logger.info(f"  ConvNeXt (encoder {CONVNEXT_INDEX}) excluded from backward pass (OOM prevention)")
+    logger.info(f"  Gradients through encoder {GRAD_ENCODER_INDEX} (SigLIP) only; encoders {DETACH_ENCODER_INDICES} detached")
 
     epoch_losses = []
     epoch_accuracies = []
@@ -195,10 +197,11 @@ def optimize_pixel_universal(
 
             # Differentiable preprocess → real encoders → LLM → loss
             preprocessed = differentiable_preprocess(pixels, preprocess_params)
-            # Detach ConvNeXt input to avoid OOM on backward (still used in forward)
-            preprocessed[CONVNEXT_INDEX] = preprocessed[CONVNEXT_INDEX].detach()
+            # Detach all encoders except SigLIP to fit backward in GPU memory
+            for idx in DETACH_ENCODER_INDICES:
+                preprocessed[idx] = preprocessed[idx].detach()
 
-            with enable_vision_grad(model, exclude_indices=[CONVNEXT_INDEX]):
+            with enable_vision_grad(model, exclude_indices=DETACH_ENCODER_INDICES):
                 loss = compute_teacher_forcing_loss(
                     model, tokenizer, question_text, answer_text,
                     conv_mode=conv_mode,
@@ -434,7 +437,7 @@ def optimize_pixel_per_question(
     run_start = time.time()
 
     logger.info(f"Starting PIXEL PER-QUESTION optimization: {total} questions, {num_steps} steps each, lr={lr}")
-    logger.info(f"  ConvNeXt (encoder {CONVNEXT_INDEX}) excluded from backward pass (OOM prevention)")
+    logger.info(f"  Gradients through encoder {GRAD_ENCODER_INDEX} (SigLIP) only; encoders {DETACH_ENCODER_INDICES} detached")
     logger.info(f"Results file: {results_file}")
 
     for sample_idx, sample in enumerate(samples):
@@ -470,10 +473,11 @@ def optimize_pixel_per_question(
             optimizer.zero_grad()
 
             preprocessed = differentiable_preprocess(pixels, preprocess_params)
-            # Detach ConvNeXt input to avoid OOM on backward (still used in forward)
-            preprocessed[CONVNEXT_INDEX] = preprocessed[CONVNEXT_INDEX].detach()
+            # Detach all encoders except SigLIP to fit backward in GPU memory
+            for idx in DETACH_ENCODER_INDICES:
+                preprocessed[idx] = preprocessed[idx].detach()
 
-            with enable_vision_grad(model, exclude_indices=[CONVNEXT_INDEX]):
+            with enable_vision_grad(model, exclude_indices=DETACH_ENCODER_INDICES):
                 loss = compute_teacher_forcing_loss(
                     model, tokenizer, question_text, answer_text,
                     conv_mode=conv_mode,
