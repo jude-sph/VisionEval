@@ -60,10 +60,10 @@ def run_evaluation(
     for sample in tqdm(
         benchmark,
         total=len(benchmark),
+        initial=len(completed),
         desc=f"{benchmark.name}/{condition.name}",
     ):
         if sample.question_id in completed:
-            skipped += 1
             continue
 
         try:
