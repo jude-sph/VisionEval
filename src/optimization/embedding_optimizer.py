@@ -196,6 +196,15 @@ def optimize_universal(
 
     optimizer = torch.optim.Adam(features, lr=lr)
 
+    # Restore optimizer state if resuming (preserves momentum/variance estimates)
+    if resume and best_epoch > 0:
+        opt_state_path = os.path.join(tensors_dir, f"{benchmark.name}_universal_optimizer.pt")
+        if os.path.exists(opt_state_path):
+            optimizer.load_state_dict(torch.load(opt_state_path, map_location=device, weights_only=True))
+            logger.info(f"Restored optimizer state from {opt_state_path}")
+        else:
+            logger.warning("No optimizer state found, using fresh Adam (may cause brief loss spike)")
+
     results_file = os.path.join(results_dir, f"{benchmark.name}_universal_embeddings.jsonl")
     run_start = time.time()
 
@@ -281,11 +290,15 @@ def optimize_universal(
         with open(epoch_log_file, "a") as f:
             f.write(json.dumps(epoch_data) + "\n")
 
-        # Save embedding checkpoint every 5 epochs
+        # Save embedding checkpoint + optimizer state every 5 epochs
         if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
             torch.save(
                 [f.detach().cpu() for f in features],
                 os.path.join(tensors_dir, f"{benchmark.name}_universal_epoch{epoch + 1}.pt"),
+            )
+            torch.save(
+                optimizer.state_dict(),
+                os.path.join(tensors_dir, f"{benchmark.name}_universal_optimizer.pt"),
             )
 
     opt_time = time.time() - run_start
