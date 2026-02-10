@@ -40,14 +40,17 @@ def load_cambrian(
 
     kwargs = {}
 
-    # Device map for multi-GPU tensor parallelism
+    # Device map: pin to single GPU for both FP16 and INT8.
+    # Upgraded accelerate (>=0.27) handles bitsandbytes models correctly
+    # with device_map={"": device_id} — no more .to() crash.
+    # "auto" can mis-place buffers (rotary embeddings) on CPU with INT8.
     if gpu_ids is not None and len(gpu_ids) > 1:
         kwargs["device_map"] = "auto"
         max_memory = {i: "11GiB" for i in gpu_ids}
         max_memory[gpu_ids[0]] = "7GiB"
         max_memory["cpu"] = "16GiB"
         kwargs["max_memory"] = max_memory
-    elif gpu_ids is not None and len(gpu_ids) == 1 and not load_8bit:
+    elif gpu_ids is not None and len(gpu_ids) == 1:
         kwargs["device_map"] = {"": gpu_ids[0]}
     else:
         kwargs["device_map"] = "auto"
@@ -57,34 +60,10 @@ def load_cambrian(
         logger.warning("flash-attn not installed, falling back to default attention")
         use_flash_attn = False
 
-    if gpu_ids is not None and len(gpu_ids) == 1 and not load_8bit:
+    if gpu_ids is not None and len(gpu_ids) == 1:
         device = f"cuda:{gpu_ids[0]}"
     else:
         device = "cuda"
-
-    # Patch dispatch_model to handle bitsandbytes quantized models.
-    # Older accelerate calls model.to(device) inside dispatch_model, which
-    # bitsandbytes forbids. Must patch in BOTH accelerate.big_modeling AND
-    # transformers.modeling_utils since transformers imports it directly.
-    _patched_modules = []
-    if load_8bit:
-        import accelerate.big_modeling as _abm
-        import transformers.modeling_utils as _tmu
-
-        _original_dispatch = _abm.dispatch_model
-
-        def _safe_dispatch(model, device_map, **dm_kwargs):
-            try:
-                return _original_dispatch(model, device_map, **dm_kwargs)
-            except ValueError as e:
-                if "not supported for" in str(e) and "bitsandbytes" in str(e):
-                    logger.info("Skipped dispatch_model .to() for quantized model")
-                    return model
-                raise
-
-        _abm.dispatch_model = _safe_dispatch
-        _tmu.dispatch_model = _safe_dispatch
-        _patched_modules = [(_abm, _original_dispatch), (_tmu, _original_dispatch)]
 
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path=model_path,
@@ -96,10 +75,6 @@ def load_cambrian(
         use_flash_attn=use_flash_attn,
         **kwargs,
     )
-
-    # Restore original dispatch_model
-    for mod, orig in _patched_modules:
-        mod.dispatch_model = orig
 
     model.eval()
     return tokenizer, model, image_processor, context_len
