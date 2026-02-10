@@ -40,17 +40,20 @@ def load_cambrian(
 
     kwargs = {}
 
-    # Device map: pin to single GPU for both FP16 and INT8.
-    # Upgraded accelerate (>=0.27) handles bitsandbytes models correctly
-    # with device_map={"": device_id} — no more .to() crash.
-    # "auto" can mis-place buffers (rotary embeddings) on CPU with INT8.
+    # Device map strategy:
+    # - Multi-GPU: "auto" with max_memory constraints
+    # - Single GPU FP16: {"": device_id} for direct placement
+    # - Single GPU INT8: "auto" + device="cuda" to avoid Cambrian's builder
+    #   overriding device_map (it sets {"": device} when device != "cuda",
+    #   which triggers accelerate's .to() crash for bitsandbytes models).
+    #   After loading, we fix any CPU-stranded buffers manually.
     if gpu_ids is not None and len(gpu_ids) > 1:
         kwargs["device_map"] = "auto"
         max_memory = {i: "11GiB" for i in gpu_ids}
         max_memory[gpu_ids[0]] = "7GiB"
         max_memory["cpu"] = "16GiB"
         kwargs["max_memory"] = max_memory
-    elif gpu_ids is not None and len(gpu_ids) == 1:
+    elif gpu_ids is not None and len(gpu_ids) == 1 and not load_8bit:
         kwargs["device_map"] = {"": gpu_ids[0]}
     else:
         kwargs["device_map"] = "auto"
@@ -60,7 +63,9 @@ def load_cambrian(
         logger.warning("flash-attn not installed, falling back to default attention")
         use_flash_attn = False
 
-    if gpu_ids is not None and len(gpu_ids) == 1:
+    # For INT8: must use device="cuda" so Cambrian's builder doesn't override
+    # device_map to {"": device} which crashes with bitsandbytes.
+    if gpu_ids is not None and len(gpu_ids) == 1 and not load_8bit:
         device = f"cuda:{gpu_ids[0]}"
     else:
         device = "cuda"
@@ -75,6 +80,22 @@ def load_cambrian(
         use_flash_attn=use_flash_attn,
         **kwargs,
     )
+
+    # Fix INT8 device placement: device_map="auto" can leave some buffers
+    # (e.g., rotary embeddings inv_freq) on CPU. Move them to the target GPU.
+    if load_8bit:
+        target_device = torch.device(f"cuda:{gpu_ids[0]}" if gpu_ids else "cuda:0")
+        moved = 0
+        for name, buf in model.named_buffers():
+            if buf.device.type == "cpu":
+                buf.data = buf.data.to(target_device)
+                moved += 1
+        for name, param in model.named_parameters():
+            if param.device.type == "cpu" and not hasattr(param, "quant_state"):
+                param.data = param.data.to(target_device)
+                moved += 1
+        if moved > 0:
+            logger.info(f"Moved {moved} CPU tensors to {target_device} after INT8 loading")
 
     model.eval()
     return tokenizer, model, image_processor, context_len
