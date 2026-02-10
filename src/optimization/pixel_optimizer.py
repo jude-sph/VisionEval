@@ -30,6 +30,12 @@ from src.optimization.differentiable_preprocess import (
 
 logger = logging.getLogger(__name__)
 
+# ConvNeXt (encoder index 3) takes 1024x1024 input and produces 9216 tokens.
+# Its backward pass stores massive intermediate activations that OOM on 12GB GPUs.
+# We detach its preprocessed input so it still contributes to the forward pass
+# but gradients only flow through the other 3 encoders (SigLIP, CLIP, DINOv2).
+CONVNEXT_INDEX = 3
+
 
 def _init_pixels(
     device: torch.device,
@@ -171,6 +177,7 @@ def optimize_pixel_universal(
     run_start = time.time()
 
     logger.info(f"Starting PIXEL UNIVERSAL optimization: {total} questions, {num_epochs} epochs, lr={lr}")
+    logger.info(f"  ConvNeXt (encoder {CONVNEXT_INDEX}) excluded from backward pass (OOM prevention)")
 
     epoch_losses = []
     epoch_accuracies = []
@@ -188,8 +195,10 @@ def optimize_pixel_universal(
 
             # Differentiable preprocess → real encoders → LLM → loss
             preprocessed = differentiable_preprocess(pixels, preprocess_params)
+            # Detach ConvNeXt input to avoid OOM on backward (still used in forward)
+            preprocessed[CONVNEXT_INDEX] = preprocessed[CONVNEXT_INDEX].detach()
 
-            with enable_vision_grad(model):
+            with enable_vision_grad(model, exclude_indices=[CONVNEXT_INDEX]):
                 loss = compute_teacher_forcing_loss(
                     model, tokenizer, question_text, answer_text,
                     conv_mode=conv_mode,
@@ -425,6 +434,7 @@ def optimize_pixel_per_question(
     run_start = time.time()
 
     logger.info(f"Starting PIXEL PER-QUESTION optimization: {total} questions, {num_steps} steps each, lr={lr}")
+    logger.info(f"  ConvNeXt (encoder {CONVNEXT_INDEX}) excluded from backward pass (OOM prevention)")
     logger.info(f"Results file: {results_file}")
 
     for sample_idx, sample in enumerate(samples):
@@ -460,8 +470,10 @@ def optimize_pixel_per_question(
             optimizer.zero_grad()
 
             preprocessed = differentiable_preprocess(pixels, preprocess_params)
+            # Detach ConvNeXt input to avoid OOM on backward (still used in forward)
+            preprocessed[CONVNEXT_INDEX] = preprocessed[CONVNEXT_INDEX].detach()
 
-            with enable_vision_grad(model):
+            with enable_vision_grad(model, exclude_indices=[CONVNEXT_INDEX]):
                 loss = compute_teacher_forcing_loss(
                     model, tokenizer, question_text, answer_text,
                     conv_mode=conv_mode,
