@@ -76,16 +76,23 @@ def optimize_per_question(
 
     # Free vision encoder memory — encode_images is patched so they're unused.
     # This saves ~3.8GB VRAM, critical for fitting backprop in 24GB FP16.
-    if hasattr(model, "get_vision_tower_aux_list"):
-        for tower in model.get_vision_tower_aux_list():
+    # Access via model.model (CambrianLlamaModel) which holds vision_tower_aux_list.
+    inner = getattr(model, "model", model)
+    towers = getattr(inner, "vision_tower_aux_list", None)
+    if towers:
+        for tower in towers:
             tower.cpu()
         torch.cuda.empty_cache()
-        logger.info("Moved vision encoders to CPU to free VRAM for backprop")
+        freed_mb = torch.cuda.mem_get_info()[0] / 1024**2
+        logger.info(f"Moved {len(towers)} vision encoders to CPU ({freed_mb:.0f}MB now free)")
 
-    # Enable gradient checkpointing to save memory
+    # Enable gradient checkpointing to save memory during backward pass.
+    # Cambrian checks `self.gradient_checkpointing and self.training`, so we
+    # must put model in train mode for checkpointing to activate.
+    model.train()
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
-        logger.info("Gradient checkpointing enabled")
+        logger.info("Gradient checkpointing enabled (model set to train mode)")
 
     results = []
     correct_after = 0
