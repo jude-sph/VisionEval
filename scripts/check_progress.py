@@ -21,8 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Expected sample counts per benchmark (from configs/benchmarks.yaml)
 EXPECTED_SAMPLES = {
     "mmmu": 900,
-    "mmbench": 3000,
-    "pope": 3000,
+    "mmbench": 4329,  # lmms-lab/MMBench en/dev split
+    "pope": 9000,
     "textvqa": 3000,
     # Temporarily disabled — add back if needed:
     # "gqa": 5000,
