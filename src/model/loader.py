@@ -61,7 +61,14 @@ def load_cambrian(
         logger.warning("flash-attn not installed, falling back to default attention")
         use_flash_attn = False
 
-    device = f"cuda:{gpu_ids[0]}" if gpu_ids else "cuda"
+    # For multi-GPU: pass device="cuda" so Cambrian's builder doesn't
+    # override device_map (it checks `if device != "cuda"`)
+    if gpu_ids is not None and len(gpu_ids) > 1:
+        device = "cuda"
+    elif gpu_ids is not None and len(gpu_ids) == 1:
+        device = f"cuda:{gpu_ids[0]}"
+    else:
+        device = "cuda"
 
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path=model_path,
