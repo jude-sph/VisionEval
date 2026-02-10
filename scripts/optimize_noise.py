@@ -118,10 +118,17 @@ def main(
     # Load model
     from src.model.loader import load_cambrian
 
-    logger.info(f"Loading model across {len(remapped_gpus)} GPU(s)...")
+    # Pixel optimization keeps vision encoders on GPU 0 (~3.8GB) and needs
+    # room for backward activations. Reduce GPU 0's LLM allocation from
+    # 7GiB to 4GiB so other GPUs absorb the extra layers.
+    needs_pixel = run_pix_universal or run_pix_per_q
+    gpu0_mem = "4GiB" if needs_pixel else "7GiB"
+
+    logger.info(f"Loading model across {len(remapped_gpus)} GPU(s) (GPU 0: {gpu0_mem})...")
     tokenizer, model, image_processor, context_len = load_cambrian(
         model_path=model_path,
         gpu_ids=remapped_gpus,
+        gpu0_max_memory=gpu0_mem,
     )
     logger.info("Model loaded successfully")
 
