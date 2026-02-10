@@ -1,4 +1,4 @@
-"""Launch all evaluation jobs sequentially on single GPU (3090 FP16).
+"""Launch all evaluation jobs sequentially on single GPU (3090 INT8).
 
 Usage:
     python scripts/run_machine.py                  # Run all benchmarks x conditions
@@ -26,34 +26,36 @@ BENCHMARK_SAMPLE_LIMITS = {
     "gqa": 5000,
 }
 
-# All benchmarks run on single GPU (3090 FP16) — multi-GPU tensor parallel
-# is incompatible with Cambrian's multi-encoder architecture
+# All benchmarks run on single GPU (3090 INT8) — multi-GPU tensor parallel
+# is incompatible with Cambrian's multi-encoder architecture.
+# INT8 quantization used for consistency with noise optimization (which
+# requires backprop headroom). All conditions compared under same model.
 ALL_JOBS = [
     # (benchmark, condition, gpu_ids, load_8bit)
-    ("gqa", "normal", "0", False),
-    ("gqa", "no_image", "0", False),
-    ("gqa", "wrong_image", "0", False),
-    ("gqa", "gaussian_noise", "0", False),
-    ("mmmu", "normal", "0", False),
-    ("mmmu", "no_image", "0", False),
-    ("mmmu", "wrong_image", "0", False),
-    ("mmmu", "gaussian_noise", "0", False),
-    ("mmbench", "normal", "0", False),
-    ("mmbench", "no_image", "0", False),
-    ("mmbench", "wrong_image", "0", False),
-    ("mmbench", "gaussian_noise", "0", False),
-    ("pope", "normal", "0", False),
-    ("pope", "no_image", "0", False),
-    ("pope", "wrong_image", "0", False),
-    ("pope", "gaussian_noise", "0", False),
-    ("textvqa", "normal", "0", False),
-    ("textvqa", "no_image", "0", False),
-    ("textvqa", "wrong_image", "0", False),
-    ("textvqa", "gaussian_noise", "0", False),
-    ("scienceqa", "normal", "0", False),
-    ("scienceqa", "no_image", "0", False),
-    ("scienceqa", "wrong_image", "0", False),
-    ("scienceqa", "gaussian_noise", "0", False),
+    ("gqa", "normal", "0", True),
+    ("gqa", "no_image", "0", True),
+    ("gqa", "wrong_image", "0", True),
+    ("gqa", "gaussian_noise", "0", True),
+    ("mmmu", "normal", "0", True),
+    ("mmmu", "no_image", "0", True),
+    ("mmmu", "wrong_image", "0", True),
+    ("mmmu", "gaussian_noise", "0", True),
+    ("mmbench", "normal", "0", True),
+    ("mmbench", "no_image", "0", True),
+    ("mmbench", "wrong_image", "0", True),
+    ("mmbench", "gaussian_noise", "0", True),
+    ("pope", "normal", "0", True),
+    ("pope", "no_image", "0", True),
+    ("pope", "wrong_image", "0", True),
+    ("pope", "gaussian_noise", "0", True),
+    ("textvqa", "normal", "0", True),
+    ("textvqa", "no_image", "0", True),
+    ("textvqa", "wrong_image", "0", True),
+    ("textvqa", "gaussian_noise", "0", True),
+    ("scienceqa", "normal", "0", True),
+    ("scienceqa", "no_image", "0", True),
+    ("scienceqa", "wrong_image", "0", True),
+    ("scienceqa", "gaussian_noise", "0", True),
 ]
 
 
@@ -94,10 +96,8 @@ def main(
         max_samples: Limit samples per benchmark (for testing).
         dry_run: Print jobs without running them.
     """
-    # All benchmarks run on single GPU (3090) — multi-GPU tensor parallel
-    # is incompatible with Cambrian's multi-encoder architecture
     jobs = ALL_JOBS
-    logger.info(f"Running {len(jobs)} jobs sequentially on single GPU FP16")
+    logger.info(f"Running {len(jobs)} jobs sequentially on single GPU INT8")
 
     if dry_run:
         for b, c, g, q in jobs:
