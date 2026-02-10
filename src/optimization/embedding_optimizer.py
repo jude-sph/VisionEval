@@ -197,7 +197,14 @@ def optimize_per_question(
         opt_time = time.time() - start_time
         final_loss = losses[-1] if losses else float("nan")
 
-        # Check accuracy AFTER optimization: generate an answer
+        # Check accuracy AFTER optimization: generate an answer.
+        # Temporarily disable gradient checkpointing and switch to eval mode
+        # so that model.generate() can use KV cache (much faster).
+        model.eval()
+        if hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+        model.config.use_cache = True
+
         with torch.no_grad(), encode_images_hook(model, features):
             from src.model.inference import run_inference
             from PIL import Image
@@ -212,6 +219,14 @@ def optimize_per_question(
                 max_new_tokens=32,
             )
             response = inference_result["response"]
+
+        # Re-enable gradient checkpointing and train mode for next question
+        model.train()
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+        model.config.use_cache = False
 
         prediction = benchmark.extract_answer(response, sample)
         correct = benchmark.score(prediction, sample)
