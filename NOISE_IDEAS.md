@@ -10,6 +10,22 @@ Ideas for crafting optimized inputs that maximize VLM benchmark accuracy without
 - Bypasses vision encoders entirely via monkey-patching `encode_images()`
 - Answers: "given unlimited freedom in embedding space, can we make the model answer correctly?"
 
+### Hardware Setup
+- **Noise optimization**: 4x Titan X Pascal (12GB each, 48GB total) on Machine A
+  - `python scripts/optimize_noise.py --gpu_ids 0,1,2,3 --benchmark mmmu`
+  - Flash Attention auto-disabled (Pascal compute 6.1 < 8.0 required)
+  - Model split across 4 GPUs via `device_map="auto"` (~4.25GB weights per GPU)
+  - 48GB total = plenty of headroom for backprop activations, no memory workarounds needed
+- **Benchmark evals**: 1x RTX 3090 (24GB) on Machine B — inference only, no backprop
+- These run on separate machines and can execute in parallel
+
+### Memory Notes (for future single-GPU attempts)
+- On 3090 (24GB) the optimization OOMs by ~112MB during backward pass
+- Three workarounds are available if needed:
+  1. **Detach ConvNeXt features**: ConvNeXt outputs 9216 tokens (16x more than other encoders at 576). Its SVA attention creates massive backward intermediates. Freezing its feature tensor (no gradients) saves ~1-2GB. The other 3 encoders still get optimized. Code change: in `_init_features`, call `.detach()` on the ConvNeXt tensor (index 3).
+  2. **Vision encoder CPU offload**: Already implemented (conditional on single-GPU). Saves ~3.8GB by moving unused encoders to CPU.
+  3. **Gradient checkpointing**: Already implemented. Saves ~10GB on LLM decoder activations.
+
 ## Future Ideas
 
 ### Universal Embedding Optimization

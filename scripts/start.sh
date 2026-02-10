@@ -53,9 +53,10 @@ if command -v tmux &> /dev/null; then
     # Kill existing session if any
     tmux kill-session -t visioneval 2>/dev/null || true
 
-    # Create new session: noise optimization first, then benchmark evals (all FP16)
+    # Run benchmark evals only. Noise optimization runs separately on the
+    # 4x Titan X Pascal machine: python scripts/optimize_noise.py --gpu_ids 0,1,2,3
     tmux new-session -d -s visioneval \
-        "cd $PROJECT_DIR && echo '=== Starting noise optimization (FP16) ===' && python scripts/optimize_noise.py --benchmark mmmu --max_samples 50 2>&1 | tee $LOG_FILE; echo ''; echo '=== Noise done. Starting benchmark evals (FP16) ===' && python scripts/run_machine.py $ARGS 2>&1 | tee -a $LOG_FILE; echo ''; echo 'All jobs complete. Press enter to close.'; read"
+        "cd $PROJECT_DIR && python scripts/run_machine.py $ARGS 2>&1 | tee $LOG_FILE; echo ''; echo 'All jobs complete. Press enter to close.'; read"
 
     echo "Session started. You can safely disconnect SSH now."
 
@@ -70,7 +71,7 @@ elif command -v screen &> /dev/null; then
     echo ""
 
     screen -dmS visioneval bash -c \
-        "cd $PROJECT_DIR && python scripts/optimize_noise.py --benchmark mmmu --max_samples 50 2>&1 | tee $LOG_FILE; python scripts/run_machine.py $ARGS 2>&1 | tee -a $LOG_FILE"
+        "cd $PROJECT_DIR && python scripts/run_machine.py $ARGS 2>&1 | tee $LOG_FILE"
 
     echo "Session started. You can safely disconnect SSH now."
 
@@ -85,7 +86,7 @@ else
     echo ""
 
     cd "$PROJECT_DIR"
-    nohup bash -c "python scripts/optimize_noise.py --benchmark mmmu --max_samples 50; python scripts/run_machine.py $ARGS" > "$LOG_FILE" 2>&1 &
+    nohup bash -c "python scripts/run_machine.py $ARGS" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 
     echo "PID: $(cat $PID_FILE)"

@@ -4,8 +4,14 @@ Finds embedding-space inputs that maximize P(correct answer) for Cambrian-8B,
 without using any real images.
 
 Usage:
+    # 4x Titan X Pascal (default — dedicated noise optimization machine)
     python scripts/optimize_noise.py --benchmark mmmu --max_samples 50
-    python scripts/optimize_noise.py --benchmark mmmu --max_samples 1  # smoke test
+
+    # Single GPU (e.g., 3090 — tight, may need gradient checkpointing)
+    python scripts/optimize_noise.py --benchmark mmmu --gpu_ids 0 --max_samples 1
+
+    # Smoke test
+    python scripts/optimize_noise.py --benchmark mmmu --max_samples 1
 """
 
 import os
@@ -20,27 +26,25 @@ logger = logging.getLogger("optimize_noise")
 
 def main(
     benchmark: str = "mmmu",
-    gpu_ids: str = "0",
+    gpu_ids: str = "0,1,2,3",
     max_samples: int = 50,
     num_steps: int = 50,
     lr: float = 0.01,
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
-    load_8bit: bool = False,
 ):
     """Run embedding-space noise optimization on a benchmark.
 
     Args:
         benchmark: Benchmark name (mmmu, pope, etc.).
-        gpu_ids: Comma-separated GPU indices.
+        gpu_ids: Comma-separated GPU indices (default: 0,1,2,3 for 4x Titan X Pascal).
         max_samples: Number of questions to optimize.
         num_steps: Gradient descent steps per question.
         lr: Adam learning rate for optimization.
         model_path: HuggingFace model path.
         conv_mode: Conversation template.
         results_dir: Directory for optimization results.
-        load_8bit: Use INT8 quantization (required to fit backprop in 24GB).
     """
     log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -61,11 +65,11 @@ def main(
         gpu_list = [int(x) for x in str(gpu_ids).split(",")]
 
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_list)
-    # Reduce CUDA memory fragmentation — we're ~112MB short and have 160MB fragmented
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     remapped_gpus = list(range(len(gpu_list)))
 
     logger.info(f"Benchmark: {benchmark}")
+    logger.info(f"GPUs: {gpu_list} (remapped to {remapped_gpus})")
     logger.info(f"Max samples: {max_samples}")
     logger.info(f"Optimization steps: {num_steps}")
     logger.info(f"Learning rate: {lr}")
@@ -73,11 +77,10 @@ def main(
     # Load model
     from src.model.loader import load_cambrian
 
-    logger.info(f"Loading model (INT8={load_8bit})...")
+    logger.info(f"Loading model across {len(remapped_gpus)} GPU(s)...")
     tokenizer, model, image_processor, context_len = load_cambrian(
         model_path=model_path,
         gpu_ids=remapped_gpus,
-        load_8bit=load_8bit,
     )
     logger.info("Model loaded successfully")
 
