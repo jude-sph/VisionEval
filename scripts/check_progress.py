@@ -25,7 +25,7 @@ EXPECTED_SAMPLES = {
     "scienceqa": 2000,
     "pope": 3000,
     "textvqa": 3000,
-    "gqa": 5000,
+    "gqa": 6088,
 }
 
 # All planned runs
