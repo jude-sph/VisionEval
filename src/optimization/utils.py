@@ -78,25 +78,30 @@ def get_encoder_output_shapes(
 
 
 @contextmanager
-def enable_vision_grad(model):
+def enable_vision_grad(model, exclude_indices: list[int] | None = None):
     """Enable gradient flow through vision encoders.
 
     Cambrian's vision towers wrap their forward pass in
     torch.set_grad_enabled(self.unfreeze_mm_vision_tower).
-    This context manager sets that flag to True on all towers,
+    This context manager sets that flag to True on selected towers,
     then restores the original values on exit.
 
     Args:
         model: The Cambrian model.
+        exclude_indices: Encoder indices to skip (leave frozen).
+            E.g. [3] to exclude ConvNeXt, which needs too much memory
+            for backward on 12GB GPUs (1024x1024 input, 9216 tokens).
     """
     inner = getattr(model, "model", model)
     towers = getattr(inner, "vision_tower_aux_list", []) or []
+    exclude = set(exclude_indices or [])
 
     # Save original values
     original_flags = []
-    for tower in towers:
+    for i, tower in enumerate(towers):
         original_flags.append(getattr(tower, "unfreeze_mm_vision_tower", False))
-        tower.unfreeze_mm_vision_tower = True
+        if i not in exclude:
+            tower.unfreeze_mm_vision_tower = True
 
     try:
         yield
