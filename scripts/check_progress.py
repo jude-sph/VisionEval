@@ -383,13 +383,59 @@ def print_progress(results_dir: str = "results"):
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    if opt_files or noise_running:
+    # Also find universal result files
+    universal_files = sorted(opt_dir.glob("*_universal_embeddings.jsonl")) if opt_dir.exists() else []
+    universal_summaries = sorted(opt_dir.glob("*_universal_summary.json")) if opt_dir.exists() else []
+
+    if opt_files or universal_files or universal_summaries or noise_running:
         noise_status = "\033[92mRUNNING\033[0m" if noise_running else "\033[91mSTOPPED\033[0m"
         print()
         print(f"  Noise Optimization  [{noise_status}]")
-        opt_header = f"  {'Benchmark':<12} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'NaN':>5} {'Avg/q':>8} {'ETA':>10} {'Updated':>12}"
-        print(opt_header)
-        print("  " + "-" * (len(opt_header) - 2))
+
+        # --- Universal results ---
+        for summary_path in universal_summaries:
+            bench_name = summary_path.stem.replace("_universal_summary", "")
+            bench_display = BENCHMARK_NAMES.get(bench_name, bench_name)
+            try:
+                with open(summary_path) as f:
+                    s = json.loads(f.read())
+                acc = s.get("accuracy", 0)
+                epochs = s.get("num_epochs", 0)
+                n = s.get("num_samples", 0)
+                init_loss = s.get("initial_avg_loss", 0)
+                final_loss = s.get("final_avg_loss", 0)
+                opt_time = s.get("optimization_time_s", 0)
+                print(f"  Universal  {bench_display:<10} {n} samples, {epochs} epochs: "
+                      f"acc={acc:.1f}%  loss {init_loss:.3f}->{final_loss:.3f}  ({opt_time:.0f}s)")
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # Check if universal is in progress (summary doesn't exist yet but log mentions it)
+        if noise_running and not universal_summaries:
+            noise_log = logs_dir / "optimize_noise.log"
+            if noise_log.exists():
+                # Check last few lines for epoch progress
+                try:
+                    with open(noise_log, "rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - 4096))
+                        tail = f.read().decode("utf-8", errors="ignore")
+                    for line in reversed(tail.splitlines()):
+                        if "Epoch " in line and "avg_loss=" in line:
+                            # Extract the epoch info
+                            epoch_part = line.split("Epoch ")[-1].split(":")[0]
+                            loss_part = line.split("avg_loss=")[-1].split(" ")[0]
+                            print(f"  Universal  (in progress)  Epoch {epoch_part}  avg_loss={loss_part}")
+                            break
+                except OSError:
+                    pass
+
+        # --- Per-question results ---
+        if opt_files or universal_files:
+            opt_header = f"  {'Mode':<14} {'Benchmark':<10} {'Progress':>10} {'Acc':>7} {'Avg Loss':>10} {'Loss Drop':>10} {'NaN':>5} {'Avg/q':>8} {'ETA':>10} {'Updated':>12}"
+            print(opt_header)
+            print("  " + "-" * (len(opt_header) - 2))
 
         for opt_path in opt_files:
             bench_name = opt_path.stem.replace("_optimized_embeddings", "")
@@ -452,7 +498,7 @@ def print_progress(results_dir: str = "results"):
             nan_str = str(nan_count) if nan_count > 0 else "-"
 
             print(
-                f"{status} {bench_display:<12} "
+                f"{status} {'Per-question':<14} {bench_display:<10} "
                 f"{done:>4}/{expected:<4} "
                 f"{acc:>6.1f}% "
                 f"{avg_loss:>9.3f} "
@@ -463,7 +509,8 @@ def print_progress(results_dir: str = "results"):
                 f"{format_time_ago(last_update):>12}"
             )
 
-        print("  " + "-" * (len(opt_header) - 2))
+        if opt_files or universal_files:
+            print("  " + "-" * (len(opt_header) - 2))
 
         # Noise optimization log hint
         noise_log = logs_dir / "optimize_noise.log"
