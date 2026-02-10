@@ -27,6 +27,7 @@ def main(
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
+    load_8bit: bool = True,
 ):
     """Run embedding-space noise optimization on a benchmark.
 
@@ -39,6 +40,7 @@ def main(
         model_path: HuggingFace model path.
         conv_mode: Conversation template.
         results_dir: Directory for optimization results.
+        load_8bit: Use INT8 quantization (required to fit backprop in 24GB).
     """
     log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -69,10 +71,11 @@ def main(
     # Load model
     from src.model.loader import load_cambrian
 
-    logger.info("Loading model...")
+    logger.info(f"Loading model (INT8={load_8bit})...")
     tokenizer, model, image_processor, context_len = load_cambrian(
         model_path=model_path,
         gpu_ids=remapped_gpus,
+        load_8bit=load_8bit,
     )
     logger.info("Model loaded successfully")
 
