@@ -49,6 +49,11 @@ def main(
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
     resume: bool = False,
+    batch_size: int = 1,
+    train_ratio: float = 1.0,
+    patience: int = 0,
+    seed: int = 42,
+    eval_every: int = 1,
 ):
     """Run noise optimization on a benchmark.
 
@@ -75,6 +80,11 @@ def main(
         conv_mode: Conversation template.
         results_dir: Directory for optimization results.
         resume: Resume universal optimization from saved checkpoint tensors.
+        batch_size: Minibatch size for universal optimization (1 = single-sample).
+        train_ratio: Fraction of samples for training (rest for test). 1.0 = no split.
+        patience: Early stopping patience on test accuracy (0 = disabled).
+        seed: Random seed for reproducible train/test split.
+        eval_every: Evaluate on test set every N epochs.
     """
     log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -109,7 +119,11 @@ def main(
     logger.info(f"GPUs: {gpu_list} (remapped to {remapped_gpus})")
     logger.info(f"Max samples: {max_samples}")
     if run_emb_universal:
-        logger.info(f"Embedding universal: {num_epochs} epochs, lr={lr}")
+        logger.info(f"Embedding universal: {num_epochs} epochs, lr={lr}, batch_size={batch_size}")
+        if train_ratio < 1.0:
+            logger.info(f"  Train/test split: {train_ratio:.0%} train, seed={seed}")
+        if patience > 0:
+            logger.info(f"  Early stopping: patience={patience}, eval_every={eval_every}")
     if run_emb_per_q:
         logger.info(f"Embedding per-question: {num_steps} steps, lr={lr}")
     if run_pix_universal:
@@ -159,6 +173,11 @@ def main(
                 conv_mode=conv_mode,
                 results_dir=results_dir,
                 resume=resume,
+                batch_size=batch_size,
+                train_ratio=train_ratio,
+                patience=patience,
+                seed=seed,
+                eval_every=eval_every,
             )
             logger.info(f"Embedding universal results: {universal_summary}")
 
