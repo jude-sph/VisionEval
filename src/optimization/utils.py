@@ -11,6 +11,31 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
+def encode_images_hook_batched(model, features: list[torch.Tensor], batch_size: int):
+    """Monkey-patch model.encode_images to return features expanded to batch_size.
+
+    Like encode_images_hook but broadcasts the shared features across the batch
+    dimension using .expand() (no memory copy).
+
+    Args:
+        model: The Cambrian model.
+        features: List of 4 tensors (one per encoder), each [1, tokens, dim].
+        batch_size: Number of items in the batch.
+    """
+    original_fn = model.encode_images
+    target_dtype = model.dtype
+
+    def patched_encode(image_aux_list, *args, **kwargs):
+        return [f.to(target_dtype).expand(batch_size, -1, -1) for f in features]
+
+    model.encode_images = patched_encode
+    try:
+        yield
+    finally:
+        model.encode_images = original_fn
+
+
+@contextmanager
 def encode_images_hook(model, features: list[torch.Tensor]):
     """Monkey-patch model.encode_images to return pre-computed features.
 

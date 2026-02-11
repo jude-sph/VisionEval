@@ -10,6 +10,7 @@ Two modes:
 
 import json
 import os
+import random
 import time
 import logging
 import torch
@@ -19,8 +20,12 @@ from cambrian.constants import IMAGE_TOKEN_INDEX
 
 from src.benchmarks.base import Benchmark, BenchmarkSample
 from src.model.inference import build_prompt
-from src.optimization.utils import encode_images_hook, get_encoder_output_shapes
-from src.optimization.teacher_forcing import compute_teacher_forcing_loss
+from src.optimization.utils import encode_images_hook, encode_images_hook_batched, get_encoder_output_shapes
+from src.optimization.teacher_forcing import (
+    compute_teacher_forcing_loss,
+    compute_batched_teacher_forcing_loss,
+    check_answers_batched,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,23 +114,34 @@ def optimize_universal(
     conv_mode: str = "llama_3",
     results_dir: str = "results/optimization",
     resume: bool = False,
+    batch_size: int = 1,
+    train_ratio: float = 1.0,
+    patience: int = 0,
+    seed: int = 42,
+    eval_every: int = 1,
 ) -> dict:
     """Optimize ONE set of embeddings across all questions.
 
-    Trains shared feature tensors by accumulating gradients across all
-    questions per epoch, then taking one optimizer step.
+    Supports batched forward passes, train/test split with early stopping,
+    and OOM fallback to single-sample processing.
 
     Args:
         model: Loaded Cambrian model.
         tokenizer: Tokenizer.
         image_processor: Image processor (used to discover encoder output shapes).
         benchmark: Loaded benchmark instance.
-        max_samples: Number of questions to train on.
+        max_samples: Number of questions to use.
         num_epochs: Total number of epochs (including already-completed ones).
         lr: Adam learning rate.
         conv_mode: Conversation template.
         results_dir: Where to save results.
         resume: If True, load saved tensors and epoch log, continue training.
+        batch_size: Minibatch size for forward passes (1 = legacy single-sample).
+        train_ratio: Fraction of samples for training (rest for test). 1.0 = no split.
+        patience: Early stopping patience (0 = disabled). Stops after this many
+            epochs without test accuracy improvement.
+        seed: Random seed for reproducible train/test split and shuffling.
+        eval_every: Evaluate on test set every N epochs (1 = every epoch).
 
     Returns:
         Summary dict with accuracy metrics.
@@ -133,10 +149,32 @@ def optimize_universal(
     os.makedirs(results_dir, exist_ok=True)
     shapes, device, dtype = _setup_model_for_optimization(model, image_processor)
 
+    # Ensure pad token exists for batching
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
     samples = list(benchmark)
     if max_samples:
         samples = samples[:max_samples]
     total = len(samples)
+
+    # --- Train/test split ---
+    rng = random.Random(seed)
+    if train_ratio < 1.0 and total > 1:
+        indices = list(range(total))
+        rng.shuffle(indices)
+        split = max(1, int(total * train_ratio))
+        train_samples = [samples[i] for i in sorted(indices[:split])]
+        test_samples = [samples[i] for i in sorted(indices[split:])]
+        logger.info(f"Train/test split (seed={seed}): {len(train_samples)} train, {len(test_samples)} test")
+    else:
+        train_samples = samples
+        test_samples = []
+        logger.info(f"No train/test split: all {total} samples used for training")
+
+    num_train = len(train_samples)
+    num_test = len(test_samples)
+    use_batching = batch_size > 1
 
     tensors_dir = os.path.join(results_dir, "tensors")
     os.makedirs(tensors_dir, exist_ok=True)
@@ -144,7 +182,10 @@ def optimize_universal(
     epoch_log_file = os.path.join(results_dir, f"{benchmark.name}_universal_epochs.jsonl")
     start_epoch = 0
     epoch_losses = []
-    epoch_accuracies = []
+    train_accuracies = []
+    test_accuracies = []
+    best_test_acc = 0.0
+    patience_counter = 0
 
     if resume:
         # Find the latest checkpoint tensor
@@ -167,7 +208,7 @@ def optimize_universal(
             start_epoch = best_epoch
             logger.info(f"Resumed from {best_checkpoint} (epoch {best_epoch})")
 
-            # Reload epoch log to restore loss/accuracy curves
+            # Reload epoch log to restore curves
             if os.path.exists(epoch_log_file):
                 with open(epoch_log_file) as f:
                     for line in f:
@@ -176,19 +217,20 @@ def optimize_universal(
                                 entry = json.loads(line)
                                 if entry["epoch"] <= best_epoch:
                                     epoch_losses.append(entry["avg_loss"])
-                                    epoch_accuracies.append(entry["accuracy"])
+                                    train_accuracies.append(entry.get("train_accuracy", entry.get("accuracy", 0)))
+                                    test_acc_val = entry.get("test_accuracy", 0)
+                                    test_accuracies.append(test_acc_val)
+                                    if test_acc_val > best_test_acc:
+                                        best_test_acc = test_acc_val
                             except (json.JSONDecodeError, KeyError):
                                 pass
-                logger.info(f"Restored {len(epoch_losses)} epoch log entries")
+                logger.info(f"Restored {len(epoch_losses)} epoch log entries (best_test_acc={best_test_acc:.1f}%)")
         else:
             logger.warning("No checkpoint found, starting from scratch")
             resume = False
 
     if not resume:
-        # One set of features for ALL questions
         features = _init_features(shapes, device, dtype)
-
-        # Save initial (random) embeddings for comparison
         torch.save(
             [f.detach().cpu() for f in features],
             os.path.join(tensors_dir, f"{benchmark.name}_universal_initial.pt"),
@@ -196,7 +238,6 @@ def optimize_universal(
 
     optimizer = torch.optim.Adam(features, lr=lr)
 
-    # Restore optimizer state if resuming (preserves momentum/variance estimates)
     if resume and best_epoch > 0:
         opt_state_path = os.path.join(tensors_dir, f"{benchmark.name}_universal_optimizer.pt")
         if os.path.exists(opt_state_path):
@@ -212,39 +253,95 @@ def optimize_universal(
         logger.info(f"Already completed {start_epoch} epochs (requested {num_epochs}), skipping training")
     else:
         logger.info(
-            f"Starting UNIVERSAL optimization: {total} questions, "
-            f"epochs {start_epoch + 1}-{num_epochs}, lr={lr}"
+            f"Starting UNIVERSAL optimization: {num_train} train + {num_test} test questions, "
+            f"epochs {start_epoch + 1}-{num_epochs}, lr={lr}, batch_size={batch_size}"
         )
+        if patience > 0 and num_test > 0:
+            logger.info(f"Early stopping: patience={patience} epochs on test accuracy")
     logger.info(f"Results file: {results_file}")
 
     for epoch in range(start_epoch, num_epochs):
         epoch_start = time.time()
         optimizer.zero_grad()
         epoch_loss = 0
-        per_question_losses = []
         nan_detected = False
 
-        for sample_idx, sample in enumerate(samples):
-            question_text = benchmark.format_question(sample)
-            answer_text = sample.ground_truth
+        # Shuffle training order each epoch
+        train_order = list(range(num_train))
+        rng.shuffle(train_order)
+        shuffled_train = [train_samples[i] for i in train_order]
 
-            with encode_images_hook(model, features):
-                loss = compute_teacher_forcing_loss(
-                    model, tokenizer, question_text, answer_text,
-                    conv_mode=conv_mode,
-                )
+        if use_batching:
+            # --- Minibatch SGD ---
+            num_batches = (num_train + batch_size - 1) // batch_size
 
-            # Average gradient across questions
-            (loss / total).backward()
-            loss_val = loss.item()
+            for batch_start in range(0, num_train, batch_size):
+                batch = shuffled_train[batch_start:batch_start + batch_size]
+                bs = len(batch)
+                questions = [benchmark.format_question(s) for s in batch]
+                answers = [s.ground_truth for s in batch]
 
-            if not torch.isfinite(torch.tensor(loss_val)):
-                logger.warning(f"  Epoch {epoch + 1} Q{sample_idx + 1}: NaN/Inf loss")
-                nan_detected = True
-                break
+                try:
+                    with encode_images_hook_batched(model, features, bs):
+                        loss = compute_batched_teacher_forcing_loss(
+                            model, tokenizer, questions, answers,
+                            conv_mode=conv_mode,
+                        )
 
-            epoch_loss += loss_val
-            per_question_losses.append(round(loss_val, 4))
+                    if not torch.isfinite(loss):
+                        logger.warning(f"  Epoch {epoch + 1} batch {batch_start // batch_size + 1}: NaN/Inf loss")
+                        nan_detected = True
+                        break
+
+                    # Accumulate gradients: divide by num_batches so total gradient
+                    # is averaged over all batches (same as single-sample accumulation)
+                    (loss / num_batches).backward()
+                    epoch_loss += loss.item() * bs
+
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.warning(f"  OOM at batch_size={bs}, falling back to single-sample")
+                        torch.cuda.empty_cache()
+                        # Single-sample fallback for this batch
+                        for sample in batch:
+                            question_text = benchmark.format_question(sample)
+                            answer_text = sample.ground_truth
+                            with encode_images_hook(model, features):
+                                loss = compute_teacher_forcing_loss(
+                                    model, tokenizer, question_text, answer_text,
+                                    conv_mode=conv_mode,
+                                )
+                            if not torch.isfinite(loss):
+                                nan_detected = True
+                                break
+                            (loss / num_train).backward()
+                            epoch_loss += loss.item()
+                    else:
+                        raise
+
+                if nan_detected:
+                    break
+
+        else:
+            # --- Legacy single-sample gradient accumulation ---
+            for sample in shuffled_train:
+                question_text = benchmark.format_question(sample)
+                answer_text = sample.ground_truth
+
+                with encode_images_hook(model, features):
+                    loss = compute_teacher_forcing_loss(
+                        model, tokenizer, question_text, answer_text,
+                        conv_mode=conv_mode,
+                    )
+
+                (loss / num_train).backward()
+                loss_val = loss.item()
+
+                if not torch.isfinite(torch.tensor(loss_val)):
+                    nan_detected = True
+                    break
+
+                epoch_loss += loss_val
 
         if nan_detected:
             logger.warning(f"  Epoch {epoch + 1}: NaN detected, stopping")
@@ -253,29 +350,60 @@ def optimize_universal(
         torch.nn.utils.clip_grad_norm_(features, max_norm=1.0)
         optimizer.step()
 
-        avg_loss = epoch_loss / total
+        avg_loss = epoch_loss / num_train
         epoch_losses.append(avg_loss)
         epoch_time = time.time() - epoch_start
 
-        # Check accuracy after each epoch (adds ~2s × N questions but very informative)
-        epoch_correct = 0
-        for sample in samples:
-            question_text = benchmark.format_question(sample)
-            _, _, correct = _check_answer(
-                model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+        # --- Evaluate accuracy ---
+        eval_batch_size = max(batch_size, 4)  # use at least 4 for eval speed
+
+        if use_batching:
+            train_correct = check_answers_batched(
+                model, tokenizer, features, train_samples, benchmark,
+                device, conv_mode, batch_size=eval_batch_size,
             )
-            if correct:
-                epoch_correct += 1
-        epoch_acc = epoch_correct / total * 100
-        epoch_accuracies.append(epoch_acc)
+        else:
+            train_correct = 0
+            for sample in train_samples:
+                question_text = benchmark.format_question(sample)
+                _, _, correct = _check_answer(
+                    model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+                )
+                if correct:
+                    train_correct += 1
+
+        train_acc = train_correct / num_train * 100
+        train_accuracies.append(train_acc)
+
+        # Test set evaluation
+        test_acc = 0.0
+        if num_test > 0 and (epoch + 1) % eval_every == 0:
+            if use_batching:
+                test_correct = check_answers_batched(
+                    model, tokenizer, features, test_samples, benchmark,
+                    device, conv_mode, batch_size=eval_batch_size,
+                )
+            else:
+                test_correct = 0
+                for sample in test_samples:
+                    question_text = benchmark.format_question(sample)
+                    _, _, correct = _check_answer(
+                        model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
+                    )
+                    if correct:
+                        test_correct += 1
+            test_acc = test_correct / num_test * 100
+        test_accuracies.append(test_acc)
 
         elapsed = time.time() - run_start
-        # Use elapsed / completed epochs for more accurate ETA
-        avg_epoch_time = elapsed / (epoch + 1)
+        epochs_done = epoch - start_epoch + 1
+        avg_epoch_time = elapsed / epochs_done
         eta = (num_epochs - epoch - 1) * avg_epoch_time
 
+        test_str = f" test={test_acc:.1f}%" if num_test > 0 else ""
         logger.info(
-            f"  Epoch {epoch + 1}/{num_epochs}: avg_loss={avg_loss:.4f} acc={epoch_acc:.1f}% "
+            f"  Epoch {epoch + 1}/{num_epochs}: avg_loss={avg_loss:.4f} "
+            f"train={train_acc:.1f}%{test_str} "
             f"| {epoch_time:.0f}s | ETA {eta / 60:.0f}min"
         )
 
@@ -283,14 +411,16 @@ def optimize_universal(
         epoch_data = {
             "epoch": epoch + 1,
             "avg_loss": round(avg_loss, 4),
-            "accuracy": round(epoch_acc, 2),
-            "per_question_losses": per_question_losses,
+            "train_accuracy": round(train_acc, 2),
+            "test_accuracy": round(test_acc, 2) if num_test > 0 else None,
+            "best_test_accuracy": round(best_test_acc, 2) if num_test > 0 else None,
+            "patience_counter": patience_counter if patience > 0 else None,
             "epoch_time_s": round(epoch_time, 1),
         }
         with open(epoch_log_file, "a") as f:
             f.write(json.dumps(epoch_data) + "\n")
 
-        # Save embedding checkpoint + optimizer state every 5 epochs
+        # Save checkpoint every 5 epochs or last epoch
         if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
             torch.save(
                 [f.detach().cpu() for f in features],
@@ -301,17 +431,34 @@ def optimize_universal(
                 os.path.join(tensors_dir, f"{benchmark.name}_universal_optimizer.pt"),
             )
 
+        # --- Early stopping ---
+        if num_test > 0 and patience > 0 and (epoch + 1) % eval_every == 0:
+            if test_acc > best_test_acc:
+                best_test_acc = test_acc
+                patience_counter = 0
+                # Save best checkpoint
+                torch.save(
+                    [f.detach().cpu() for f in features],
+                    os.path.join(tensors_dir, f"{benchmark.name}_universal_best.pt"),
+                )
+                logger.info(f"    New best test accuracy: {best_test_acc:.1f}% — saved best checkpoint")
+            else:
+                patience_counter += 1
+                logger.info(f"    No improvement (best={best_test_acc:.1f}%), patience {patience_counter}/{patience}")
+                if patience_counter >= patience:
+                    logger.info(f"  EARLY STOPPING at epoch {epoch + 1} (patience={patience})")
+                    break
+
     opt_time = time.time() - run_start
     logger.info(f"Universal optimization done in {opt_time:.0f}s. Final evaluation...")
 
-    # Final evaluation: detailed per-question results with the optimized embeddings
+    # Final evaluation on ALL samples (train + test combined)
     correct_count = 0
     per_question_results = []
 
     for sample_idx, sample in enumerate(samples):
         question_text = benchmark.format_question(sample)
 
-        # Get per-question loss with final embeddings
         with torch.no_grad(), encode_images_hook(model, features):
             final_loss = compute_teacher_forcing_loss(
                 model, tokenizer, question_text, sample.ground_truth,
@@ -324,6 +471,7 @@ def optimize_universal(
         if correct:
             correct_count += 1
 
+        split = "train" if sample in train_samples else "test"
         per_question_results.append({
             "question_id": sample.question_id,
             "question": sample.question[:200],
@@ -332,6 +480,7 @@ def optimize_universal(
             "raw_response": response[:200],
             "correct": correct,
             "final_loss": round(final_loss, 4),
+            "split": split,
         })
 
         if (sample_idx + 1) % 10 == 0:
@@ -340,28 +489,45 @@ def optimize_universal(
 
     accuracy = correct_count / total * 100 if total > 0 else 0
 
-    # Save final universal embedding tensors
+    # Save final embedding tensors
     torch.save(
         [f.detach().cpu() for f in features],
         os.path.join(tensors_dir, f"{benchmark.name}_universal.pt"),
     )
 
-    # Write per-question eval results
     with open(results_file, "w") as f:
         for r in per_question_results:
             f.write(json.dumps(r) + "\n")
+
+    # Compute train/test accuracy from final eval
+    train_final = [r for r in per_question_results if r["split"] == "train"]
+    test_final = [r for r in per_question_results if r["split"] == "test"]
+    train_final_acc = sum(r["correct"] for r in train_final) / len(train_final) * 100 if train_final else 0
+    test_final_acc = sum(r["correct"] for r in test_final) / len(test_final) * 100 if test_final else 0
 
     summary = {
         "mode": "universal",
         "benchmark": benchmark.name,
         "num_samples": total,
+        "num_train": num_train,
+        "num_test": num_test,
         "num_epochs": len(epoch_losses),
         "learning_rate": lr,
+        "batch_size": batch_size,
+        "train_ratio": train_ratio,
+        "seed": seed,
         "accuracy": round(accuracy, 2),
+        "train_accuracy": round(train_final_acc, 2),
+        "test_accuracy": round(test_final_acc, 2),
+        "best_test_accuracy": round(best_test_acc, 2) if num_test > 0 else None,
+        "early_stopped": patience_counter >= patience if patience > 0 else False,
         "initial_avg_loss": round(epoch_losses[0], 4) if epoch_losses else 0,
         "final_avg_loss": round(epoch_losses[-1], 4) if epoch_losses else 0,
         "loss_curve": [round(l, 4) for l in epoch_losses],
-        "accuracy_curve": [round(a, 2) for a in epoch_accuracies],
+        "train_accuracy_curve": [round(a, 2) for a in train_accuracies],
+        "test_accuracy_curve": [round(a, 2) for a in test_accuracies],
+        "train_question_ids": [s.question_id for s in train_samples],
+        "test_question_ids": [s.question_id for s in test_samples],
         "optimization_time_s": round(opt_time, 1),
     }
 
