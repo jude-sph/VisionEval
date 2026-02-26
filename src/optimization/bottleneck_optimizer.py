@@ -396,9 +396,9 @@ def optimize_bottleneck_per_question(
             model, tokenizer, image_processor, conv_mode=conv_mode,
         )
         logger.info(
-            f"Will expand {num_tokens} bottleneck token(s) to "
-            f"{num_image_tokens} positions for inference, "
-            f"{train_expand} positions for training (memory-safe)"
+            f"Discovered normal image region = {num_image_tokens} tokens. "
+            f"Using train_expand={train_expand} for all forward passes "
+            f"(GPU memory constraint)."
         )
     else:
         logger.warning(
@@ -479,7 +479,7 @@ def optimize_bottleneck_per_question(
         )
 
         # Initial measurements (before any optimisation)
-        # Use train_expand for initial loss too (consistent with training)
+        # Use train_expand for all forward passes to stay within GPU memory
         with torch.no_grad():
             initial_loss = _bottleneck_forward_loss(
                 model, tokenizer, question_text, answer_text, tokens, conv_mode,
@@ -488,9 +488,8 @@ def optimize_bottleneck_per_question(
             ).item()
         initial_response, initial_pred, initial_correct = _bottleneck_check_answer(
             model, tokenizer, question_text, tokens, benchmark, sample, conv_mode,
-            num_image_tokens=num_image_tokens,
+            num_image_tokens=train_expand,
         )
-        torch.cuda.empty_cache()  # Free memory from 600-token inference pass
         initial_lm_decode = _decode_tokens_lm_head(tokens.detach(), model, tokenizer, top_k=5)
         initial_token_norms = [round(tokens[i].detach().norm().item(), 6) for i in range(num_tokens)]
 
@@ -555,9 +554,8 @@ def optimize_bottleneck_per_question(
             if is_snapshot:
                 snap_response, snap_pred, snap_correct = _bottleneck_check_answer(
                     model, tokenizer, question_text, tokens, benchmark, sample, conv_mode,
-                    num_image_tokens=num_image_tokens,
+                    num_image_tokens=train_expand,
                 )
-                torch.cuda.empty_cache()  # Free 600-token inference memory before next training step
                 snap_decode = _decode_tokens_lm_head(tokens.detach(), model, tokenizer, top_k=5)
                 snap_norms = [round(tokens[i].detach().norm().item(), 6) for i in range(num_tokens)]
 
@@ -587,7 +585,7 @@ def optimize_bottleneck_per_question(
         # Final answer check
         response, prediction, correct = _bottleneck_check_answer(
             model, tokenizer, question_text, tokens, benchmark, sample, conv_mode,
-            num_image_tokens=num_image_tokens,
+            num_image_tokens=train_expand,
         )
         if correct:
             correct_after += 1
