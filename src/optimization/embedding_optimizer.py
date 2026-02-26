@@ -324,7 +324,8 @@ def optimize_universal(
 
         else:
             # --- Legacy single-sample gradient accumulation ---
-            for sample in shuffled_train:
+            train_phase_start = time.time()
+            for sample_idx, sample in enumerate(shuffled_train):
                 question_text = benchmark.format_question(sample)
                 answer_text = sample.ground_truth
 
@@ -343,6 +344,20 @@ def optimize_universal(
 
                 epoch_loss += loss_val
 
+                # Progress every 25 samples or every 10% of training set
+                log_interval = max(25, num_train // 10)
+                if (sample_idx + 1) % log_interval == 0:
+                    done = sample_idx + 1
+                    train_elapsed = time.time() - train_phase_start
+                    samples_per_sec = done / train_elapsed
+                    remaining = num_train - done
+                    phase_eta = remaining / samples_per_sec if samples_per_sec > 0 else 0
+                    running_avg_loss = epoch_loss / done
+                    logger.info(
+                        f"    [{done}/{num_train}] loss={running_avg_loss:.4f} "
+                        f"({samples_per_sec:.1f} samples/s, ~{phase_eta:.0f}s left in epoch)"
+                    )
+
         if nan_detected:
             logger.warning(f"  Epoch {epoch + 1}: NaN detected, stopping")
             break
@@ -352,19 +367,21 @@ def optimize_universal(
 
         avg_loss = epoch_loss / num_train
         epoch_losses.append(avg_loss)
-        epoch_time = time.time() - epoch_start
+        train_time = time.time() - epoch_start
 
         # --- Evaluate accuracy ---
-        eval_batch_size = max(batch_size, 4)  # use at least 4 for eval speed
+        logger.info(f"    Evaluating train accuracy ({num_train} samples)...")
+        eval_start = time.time()
 
         if use_batching:
+            eval_batch_size = max(batch_size, 4)
             train_correct = check_answers_batched(
                 model, tokenizer, features, train_samples, benchmark,
                 device, conv_mode, batch_size=eval_batch_size,
             )
         else:
             train_correct = 0
-            for sample in train_samples:
+            for eval_idx, sample in enumerate(train_samples):
                 question_text = benchmark.format_question(sample)
                 _, _, correct = _check_answer(
                     model, tokenizer, features, question_text, benchmark, sample, device, conv_mode,
@@ -374,10 +391,14 @@ def optimize_universal(
 
         train_acc = train_correct / num_train * 100
         train_accuracies.append(train_acc)
+        train_eval_time = time.time() - eval_start
 
         # Test set evaluation
         test_acc = 0.0
+        test_eval_time = 0
         if num_test > 0 and (epoch + 1) % eval_every == 0:
+            logger.info(f"    Evaluating test accuracy ({num_test} samples)...")
+            test_eval_start = time.time()
             if use_batching:
                 test_correct = check_answers_batched(
                     model, tokenizer, features, test_samples, benchmark,
@@ -393,18 +414,22 @@ def optimize_universal(
                     if correct:
                         test_correct += 1
             test_acc = test_correct / num_test * 100
+            test_eval_time = time.time() - test_eval_start
         test_accuracies.append(test_acc)
 
-        elapsed = time.time() - run_start
+        epoch_time = time.time() - epoch_start
         epochs_done = epoch - start_epoch + 1
-        avg_epoch_time = elapsed / epochs_done
-        eta = (num_epochs - epoch - 1) * avg_epoch_time
+        # ETA based on measured epoch time (includes train + eval)
+        avg_epoch_time = epoch_time  # use this epoch's actual time, not cumulative average
+        remaining_epochs = num_epochs - epoch - 1
+        eta = remaining_epochs * avg_epoch_time
 
         test_str = f" test={test_acc:.1f}%" if num_test > 0 else ""
         logger.info(
             f"  Epoch {epoch + 1}/{num_epochs}: avg_loss={avg_loss:.4f} "
             f"train={train_acc:.1f}%{test_str} "
-            f"| {epoch_time:.0f}s | ETA {eta / 60:.0f}min"
+            f"| train={train_time:.0f}s eval={train_eval_time + test_eval_time:.0f}s "
+            f"| ETA {eta / 60:.0f}min ({remaining_epochs} epochs)"
         )
 
         # Write epoch data in real-time

@@ -3,6 +3,7 @@ results/raw/
 results/aggregated/
 results/plots/
 results/optimization/
+results/two_bit/
 
 # Logs
 logs/
