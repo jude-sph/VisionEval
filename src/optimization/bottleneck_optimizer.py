@@ -348,7 +348,7 @@ def optimize_bottleneck_per_question(
     max_samples: int = 50,
     num_steps: int = 50,
     lr: float = 0.01,
-    train_expand: int = 16,
+    train_expand: int = 1,
     conv_mode: str = "llama_3",
     results_dir: str = "results/bottleneck",
     snapshot_every: int = 5,
@@ -479,15 +479,18 @@ def optimize_bottleneck_per_question(
         )
 
         # Initial measurements (before any optimisation)
+        # Use train_expand for initial loss too (consistent with training)
         with torch.no_grad():
             initial_loss = _bottleneck_forward_loss(
                 model, tokenizer, question_text, answer_text, tokens, conv_mode,
                 num_image_tokens=num_image_tokens,
+                train_expand=train_expand,
             ).item()
         initial_response, initial_pred, initial_correct = _bottleneck_check_answer(
             model, tokenizer, question_text, tokens, benchmark, sample, conv_mode,
             num_image_tokens=num_image_tokens,
         )
+        torch.cuda.empty_cache()  # Free memory from 600-token inference pass
         initial_lm_decode = _decode_tokens_lm_head(tokens.detach(), model, tokenizer, top_k=5)
         initial_token_norms = [round(tokens[i].detach().norm().item(), 6) for i in range(num_tokens)]
 
@@ -554,6 +557,7 @@ def optimize_bottleneck_per_question(
                     model, tokenizer, question_text, tokens, benchmark, sample, conv_mode,
                     num_image_tokens=num_image_tokens,
                 )
+                torch.cuda.empty_cache()  # Free 600-token inference memory before next training step
                 snap_decode = _decode_tokens_lm_head(tokens.detach(), model, tokenizer, top_k=5)
                 snap_norms = [round(tokens[i].detach().norm().item(), 6) for i in range(num_tokens)]
 

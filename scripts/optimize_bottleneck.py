@@ -40,7 +40,7 @@ def main(
     num_tokens: int = 1,
     num_steps: int = 50,
     lr: float = 0.01,
-    train_expand: int = 16,
+    train_expand: int = 1,
     snapshot_every: int = 5,
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
