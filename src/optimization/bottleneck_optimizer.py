@@ -414,13 +414,21 @@ def optimize_bottleneck_per_question(
         f"Using train_expand={train_expand} for all forward passes."
     )
 
-    # Enable gradient checkpointing
+    # Freeze all model parameters — we only optimize the bottleneck tokens
+    for param in model.parameters():
+        param.requires_grad_(False)
+    logger.info("Froze all model parameters")
+
+    # Enable gradient checkpointing (needs model.train() for the flag,
+    # but all params are frozen so no gradients are stored for them)
     model.train()
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
         logger.info("Gradient checkpointing enabled")
+
+    _mem("after freeze + grad checkpoint")
 
     samples = list(benchmark)
     if max_samples:
