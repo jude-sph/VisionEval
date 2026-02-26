@@ -555,6 +555,222 @@ def print_progress(results_dir: str = "results"):
         if noise_log.exists():
             print(f"  Log: tail -f {noise_log}")
 
+    # --- Bottleneck Optimization section ---
+    two_bit_dir = Path(results_dir) / "two_bit"
+
+    # Check if bottleneck is running (tmux or PID)
+    bottleneck_running = False
+    bottleneck_pid_file = logs_dir / "bottleneck.pid"
+    if bottleneck_pid_file.exists():
+        try:
+            pid = int(bottleneck_pid_file.read_text().strip())
+            os.kill(pid, 0)
+            bottleneck_running = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    if not bottleneck_running:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["tmux", "has-session", "-t", "bottleneck"],
+                capture_output=True, timeout=5,
+            )
+            bottleneck_running = result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # Find bottleneck result files
+    bottleneck_jsonl_files = sorted(two_bit_dir.glob("*_bottleneck.jsonl")) if two_bit_dir.exists() else []
+    bottleneck_summaries = sorted(two_bit_dir.glob("*_bottleneck_summary.json")) if two_bit_dir.exists() else []
+    codebook_files = sorted(two_bit_dir.glob("*_codebook_analysis.json")) if two_bit_dir.exists() else []
+
+    has_bottleneck = bottleneck_jsonl_files or bottleneck_summaries or bottleneck_running
+
+    if has_bottleneck:
+        bn_status = "\033[92mRUNNING\033[0m" if bottleneck_running else "\033[91mSTOPPED\033[0m"
+        print()
+        print(f"  Bottleneck Optimization  [{bn_status}]")
+
+        for bn_path in bottleneck_jsonl_files:
+            bench_name = bn_path.stem.replace("_bottleneck", "")
+            bench_display = BENCHMARK_NAMES.get(bench_name, bench_name)
+
+            done = 0
+            correct = 0
+            correct_before = 0
+            nan_count = 0
+            total_loss_init = 0
+            total_loss_final = 0
+            valid_loss_count = 0
+            total_time = 0
+            expected = 50
+            num_tokens = 1
+            lm_decode_samples = []  # collect a few for display
+
+            with open(bn_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        r = json.loads(line)
+                        done += 1
+                        if r.get("correct"):
+                            correct += 1
+                        if r.get("initial_correct"):
+                            correct_before += 1
+                        if r.get("nan_detected"):
+                            nan_count += 1
+                        total_loss_init += r.get("initial_loss", 0)
+                        if r.get("final_loss") is not None:
+                            total_loss_final += r["final_loss"]
+                            valid_loss_count += 1
+                        total_time += r.get("optimization_time_s", 0)
+                        num_tokens = r.get("num_tokens", 1)
+                        # Collect last few LM head decodings for display
+                        if r.get("final_lm_decode") and len(lm_decode_samples) < 3:
+                            gt = r.get("ground_truth", "?")
+                            top_word = r["final_lm_decode"][0][0][0] if r["final_lm_decode"][0] else "?"
+                            lm_decode_samples.append((gt, top_word, r.get("correct", False)))
+                    except json.JSONDecodeError:
+                        continue
+
+            # Check summary for expected count
+            summary_path = two_bit_dir / f"{bench_name}_bottleneck_summary.json"
+            num_image_tokens = None
+            if summary_path.exists():
+                try:
+                    with open(summary_path) as f:
+                        summary = json.loads(f.read())
+                    expected = summary.get("num_samples", expected)
+                    num_image_tokens = summary.get("num_image_tokens")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+            last_update = datetime.fromtimestamp(bn_path.stat().st_mtime) if done > 0 else None
+
+            acc_before = (correct_before / done * 100) if done > 0 else 0
+            acc_after = (correct / done * 100) if done > 0 else 0
+            avg_loss_init = (total_loss_init / done) if done > 0 else 0
+            avg_loss_final = (total_loss_final / valid_loss_count) if valid_loss_count > 0 else 0
+            avg_drop = avg_loss_init - avg_loss_final if valid_loss_count > 0 else 0
+            avg_time = (total_time / done) if done > 0 else 0
+            remaining = max(0, expected - done)
+            eta_s = remaining * avg_time if done > 0 else 0
+
+            if done >= expected and expected > 0:
+                status = "\033[92m DONE \033[0m"
+            elif done > 0:
+                status = "\033[93m >>>  \033[0m"
+            else:
+                status = "      "
+
+            # Compact info line
+            expand_str = f" -> {num_image_tokens} positions" if num_image_tokens else ""
+            print(f"  {bench_display}: {num_tokens} token{expand_str}")
+
+            # Progress bar
+            pct = (done / expected * 100) if expected > 0 else 0
+            bar_width = 25
+            filled = int(bar_width * pct / 100)
+            bar = "=" * filled + (">" if filled < bar_width else "") + " " * max(0, bar_width - filled - 1)
+
+            eta_str = format_duration(eta_s) if done > 0 and done < expected else ("done" if done >= expected else "-")
+            nan_str = f"  NaN: {nan_count}" if nan_count > 0 else ""
+
+            print(
+                f"{status} [{bar}] {done}/{expected} ({pct:.0f}%)  "
+                f"acc: {acc_before:.0f}% -> {acc_after:.0f}%  "
+                f"loss: {avg_loss_init:.3f} -> {avg_loss_final:.3f} ({avg_drop:+.3f})  "
+                f"ETA: {eta_str}{nan_str}"
+            )
+
+            if done > 0:
+                print(
+                    f"       avg {avg_time:.1f}s/question  "
+                    f"updated {format_time_ago(last_update)}"
+                )
+
+            # Show a few recent LM head decodings (what the token looks like to the LLM)
+            if lm_decode_samples:
+                decode_strs = []
+                for gt, top_word, was_correct in lm_decode_samples:
+                    mark = "+" if was_correct else "-"
+                    decode_strs.append(f"gt={gt}->'{top_word}'({mark})")
+                print(f"       recent decodings: {', '.join(decode_strs)}")
+
+        # Show codebook analysis results if available
+        for cb_path in codebook_files:
+            bench_name = cb_path.stem.replace("_codebook_analysis", "")
+            bench_display = BENCHMARK_NAMES.get(bench_name, bench_name)
+            try:
+                with open(cb_path) as f:
+                    cb = json.loads(f.read())
+
+                print(f"\n  Codebook ({bench_display}):")
+
+                # Per-class summary
+                if cb.get("answer_classes"):
+                    parts = []
+                    for ans, stats in sorted(cb["answer_classes"].items()):
+                        parts.append(f"{ans}: n={stats['count']} acc={stats['accuracy']:.0f}% spread={stats['within_class_spread_mean']:.2f}")
+                    for p in parts:
+                        print(f"    {p}")
+
+                # Between-class distances
+                if cb.get("between_class_distances"):
+                    dist_parts = []
+                    for pair, d in sorted(cb["between_class_distances"].items()):
+                        dist_parts.append(f"{pair}: cos={d['cosine_similarity']:.3f}")
+                    print(f"    distances: {', '.join(dist_parts)}")
+
+                # Step-accuracy curve (just first and last)
+                if cb.get("step_accuracy_curve"):
+                    curve = cb["step_accuracy_curve"]
+                    if len(curve) >= 2:
+                        print(f"    accuracy: step {curve[0]['step']} = {curve[0]['accuracy']:.1f}%  ->  step {curve[-1]['step']} = {curve[-1]['accuracy']:.1f}%")
+
+                # LM head decoded centroids
+                if cb.get("lm_head_decoding"):
+                    decode_parts = []
+                    for ans, toks in sorted(cb["lm_head_decoding"].items()):
+                        if toks and toks[0]:
+                            top = toks[0][0]
+                            decode_parts.append(f"{ans}->'{top['token']}'({top['prob']:.2f})")
+                    if decode_parts:
+                        print(f"    centroids: {', '.join(decode_parts)}")
+
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # Log hint
+        bottleneck_log = logs_dir / "optimize_bottleneck.log"
+        if bottleneck_log.exists():
+            print(f"  Log: tail -f {bottleneck_log}")
+
+        # In-progress detection from log tail (when no results file exists yet)
+        if bottleneck_running and not bottleneck_jsonl_files:
+            bottleneck_log = logs_dir / "optimize_bottleneck.log"
+            if bottleneck_log.exists():
+                try:
+                    with open(bottleneck_log, "rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - 4096))
+                        tail = f.read().decode("utf-8", errors="ignore")
+                    for line in reversed(tail.splitlines()):
+                        if "Loading model" in line:
+                            print(f"  (Loading model...)")
+                            break
+                        if "Discovered image token count" in line:
+                            count = line.split("count: ")[-1].strip()
+                            print(f"  (Discovered {count} image tokens, starting optimization...)")
+                            break
+                        if "BOTTLENECK per-question" in line:
+                            print(f"  (Starting per-question optimization...)")
+                            break
+                except OSError:
+                    pass
+
     # Log file hint
     log_file = logs_dir / "eval.log"
     if log_file.exists():

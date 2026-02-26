@@ -591,6 +591,7 @@ def optimize_bottleneck_per_question(
             "choices": sample.choices,
             "num_answer_choices": len(sample.choices) if sample.choices else None,
             "num_tokens": num_tokens,
+            "num_image_tokens": num_image_tokens,
 
             # Before optimisation
             "initial_prediction": initial_pred,
