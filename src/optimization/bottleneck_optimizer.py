@@ -389,6 +389,13 @@ def optimize_bottleneck_per_question(
     device = next(model.parameters()).device
     hidden_dim = model.config.hidden_size
 
+    def _mem(label=""):
+        alloc = torch.cuda.memory_allocated() / 1e9
+        resv = torch.cuda.memory_reserved() / 1e9
+        logger.info(f"[MEM {label}] allocated={alloc:.2f}GB reserved={resv:.2f}GB")
+
+    _mem("after model load")
+
     # Offload vision encoders FIRST to free GPU memory
     inner = getattr(model, "model", model)
     towers = getattr(inner, "vision_tower_aux_list", None)
@@ -398,9 +405,9 @@ def optimize_bottleneck_per_question(
         torch.cuda.empty_cache()
         logger.info(f"Offloaded {len(towers)} vision encoders to CPU")
 
+    _mem("after encoder offload")
+
     # Image token count — hardcoded for Cambrian-8B (discovered empirically = 600)
-    # The discover_image_token_count() function requires vision encoders on GPU
-    # which doesn't fit alongside the LLM on a single 24GB card.
     num_image_tokens = 600
     logger.info(
         f"Image token region = {num_image_tokens} tokens. "
@@ -471,17 +478,22 @@ def optimize_bottleneck_per_question(
         )
 
         # Initial measurements (before any optimisation)
-        # Use train_expand for all forward passes to stay within GPU memory
+        _mem("before initial forward")
         with torch.no_grad():
             initial_loss = _bottleneck_forward_loss(
                 model, tokenizer, question_text, answer_text, tokens, conv_mode,
                 num_image_tokens=num_image_tokens,
                 train_expand=train_expand,
             ).item()
+        _mem("after initial loss (no_grad)")
+        torch.cuda.empty_cache()
+        _mem("after empty_cache")
         initial_response, initial_pred, initial_correct = _bottleneck_check_answer(
             model, tokenizer, question_text, tokens, benchmark, sample, conv_mode,
             num_image_tokens=train_expand,
         )
+        torch.cuda.empty_cache()
+        _mem("after initial check_answer + empty_cache")
         initial_lm_decode = _decode_tokens_lm_head(tokens.detach(), model, tokenizer, top_k=5)
         initial_token_norms = [round(tokens[i].detach().norm().item(), 6) for i in range(num_tokens)]
 
@@ -510,12 +522,18 @@ def optimize_bottleneck_per_question(
 
         for step in range(num_steps):
             optimizer.zero_grad()
+            if step == 0:
+                _mem("before first training forward")
             loss = _bottleneck_forward_loss(
                 model, tokenizer, question_text, answer_text, tokens, conv_mode,
                 num_image_tokens=num_image_tokens,
                 train_expand=train_expand,
             )
+            if step == 0:
+                _mem("after first training forward (before backward)")
             loss.backward()
+            if step == 0:
+                _mem("after first backward")
             torch.nn.utils.clip_grad_norm_([tokens], max_norm=1.0)
             optimizer.step()
 
