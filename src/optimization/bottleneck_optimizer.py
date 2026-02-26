@@ -92,16 +92,19 @@ def discover_image_token_count(model, tokenizer, image_processor, conv_mode="lla
     return image_token_count
 
 
-def _expand_bottleneck(bottleneck_tokens, num_image_tokens):
+def _expand_bottleneck(bottleneck_tokens, num_image_tokens, grad_positions=8):
     """Expand K bottleneck tokens to fill num_image_tokens positions.
 
-    For K=1: repeats the single token N times (all positions identical).
-    For K=2: first half = token 0, second half = token 1 (block repeat).
-    General: repeat_interleave each token to fill N/K positions.
+    To avoid OOM during backward pass, only `grad_positions` evenly-spaced
+    copies carry gradients.  The remaining positions are filled with detached
+    copies (same values, no backward graph).  The model sees the full 600-token
+    sequence at the correct positional encodings, but memory scales with
+    grad_positions rather than num_image_tokens.
 
     Args:
         bottleneck_tokens: Learnable tensor [K, hidden_dim].
         num_image_tokens: Target number of positions to fill.
+        grad_positions: How many positions carry gradients (default 8).
 
     Returns:
         Expanded tensor [num_image_tokens, hidden_dim].
@@ -110,15 +113,24 @@ def _expand_bottleneck(bottleneck_tokens, num_image_tokens):
     if num_image_tokens is None or num_image_tokens <= K:
         return bottleneck_tokens
 
-    tokens_per_slot = num_image_tokens // K
-    expanded = bottleneck_tokens.repeat_interleave(tokens_per_slot, dim=0)
+    # Pick evenly-spaced positions that will carry gradients
+    grad_positions = min(grad_positions, num_image_tokens)
+    grad_indices = set(
+        int(i * num_image_tokens / grad_positions)
+        for i in range(grad_positions)
+    )
 
-    # Handle remainder (pad with last token)
-    remainder = num_image_tokens - expanded.shape[0]
-    if remainder > 0:
-        expanded = torch.cat([expanded, expanded[-1:].expand(remainder, -1)], dim=0)
+    segments = []
+    for pos in range(num_image_tokens):
+        tok_idx = min(pos * K // num_image_tokens, K - 1)
+        if pos in grad_indices:
+            # This copy participates in backward pass
+            segments.append(bottleneck_tokens[tok_idx].unsqueeze(0))
+        else:
+            # Detached copy — same value, no gradient storage
+            segments.append(bottleneck_tokens[tok_idx].detach().unsqueeze(0))
 
-    return expanded
+    return torch.cat(segments, dim=0)
 
 
 # ---------------------------------------------------------------------------
