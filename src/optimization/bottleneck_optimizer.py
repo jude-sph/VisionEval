@@ -389,24 +389,7 @@ def optimize_bottleneck_per_question(
     device = next(model.parameters()).device
     hidden_dim = model.config.hidden_size
 
-    # Discover image token count BEFORE offloading vision encoders
-    num_image_tokens = None
-    if image_processor is not None:
-        num_image_tokens = discover_image_token_count(
-            model, tokenizer, image_processor, conv_mode=conv_mode,
-        )
-        logger.info(
-            f"Discovered normal image region = {num_image_tokens} tokens. "
-            f"Using train_expand={train_expand} for all forward passes "
-            f"(GPU memory constraint)."
-        )
-    else:
-        logger.warning(
-            "No image_processor provided — bottleneck tokens will NOT be "
-            "expanded to match image region length. Positional encoding confound!"
-        )
-
-    # Offload vision encoders to save memory — we don't use them at all
+    # Offload vision encoders FIRST to free GPU memory
     inner = getattr(model, "model", model)
     towers = getattr(inner, "vision_tower_aux_list", None)
     if towers:
@@ -414,6 +397,15 @@ def optimize_bottleneck_per_question(
             tower.cpu()
         torch.cuda.empty_cache()
         logger.info(f"Offloaded {len(towers)} vision encoders to CPU")
+
+    # Image token count — hardcoded for Cambrian-8B (discovered empirically = 600)
+    # The discover_image_token_count() function requires vision encoders on GPU
+    # which doesn't fit alongside the LLM on a single 24GB card.
+    num_image_tokens = 600
+    logger.info(
+        f"Image token region = {num_image_tokens} tokens. "
+        f"Using train_expand={train_expand} for all forward passes."
+    )
 
     # Enable gradient checkpointing
     model.train()
