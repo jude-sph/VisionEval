@@ -92,19 +92,16 @@ def discover_image_token_count(model, tokenizer, image_processor, conv_mode="lla
     return image_token_count
 
 
-def _expand_bottleneck(bottleneck_tokens, num_image_tokens, grad_positions=8):
+def _expand_bottleneck(bottleneck_tokens, num_image_tokens):
     """Expand K bottleneck tokens to fill num_image_tokens positions.
 
-    To avoid OOM during backward pass, only `grad_positions` evenly-spaced
-    copies carry gradients.  The remaining positions are filled with detached
-    copies (same values, no backward graph).  The model sees the full 600-token
-    sequence at the correct positional encodings, but memory scales with
-    grad_positions rather than num_image_tokens.
+    For K=1: repeats the single token N times (all positions identical).
+    For K=2: first half = token 0, second half = token 1 (block repeat).
+    General: repeat_interleave each token to fill N/K positions.
 
     Args:
         bottleneck_tokens: Learnable tensor [K, hidden_dim].
         num_image_tokens: Target number of positions to fill.
-        grad_positions: How many positions carry gradients (default 8).
 
     Returns:
         Expanded tensor [num_image_tokens, hidden_dim].
@@ -113,24 +110,15 @@ def _expand_bottleneck(bottleneck_tokens, num_image_tokens, grad_positions=8):
     if num_image_tokens is None or num_image_tokens <= K:
         return bottleneck_tokens
 
-    # Pick evenly-spaced positions that will carry gradients
-    grad_positions = min(grad_positions, num_image_tokens)
-    grad_indices = set(
-        int(i * num_image_tokens / grad_positions)
-        for i in range(grad_positions)
-    )
+    tokens_per_slot = num_image_tokens // K
+    expanded = bottleneck_tokens.repeat_interleave(tokens_per_slot, dim=0)
 
-    segments = []
-    for pos in range(num_image_tokens):
-        tok_idx = min(pos * K // num_image_tokens, K - 1)
-        if pos in grad_indices:
-            # This copy participates in backward pass
-            segments.append(bottleneck_tokens[tok_idx].unsqueeze(0))
-        else:
-            # Detached copy — same value, no gradient storage
-            segments.append(bottleneck_tokens[tok_idx].detach().unsqueeze(0))
+    # Handle remainder (pad with last token)
+    remainder = num_image_tokens - expanded.shape[0]
+    if remainder > 0:
+        expanded = torch.cat([expanded, expanded[-1:].expand(remainder, -1)], dim=0)
 
-    return torch.cat(segments, dim=0)
+    return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -242,15 +230,22 @@ def _bottleneck_forward_loss(
     bottleneck_tokens: torch.Tensor,
     conv_mode: str = "llama_3",
     num_image_tokens: int | None = None,
+    train_expand: int | None = None,
 ) -> torch.Tensor:
     """Compute teacher-forcing loss with bottleneck tokens replacing images.
+
+    For training, uses a shorter expansion (train_expand) to fit in GPU
+    memory.  The full expansion (num_image_tokens) is only used for
+    inference under no_grad.
 
     Returns:
         Scalar loss tensor (differentiable w.r.t. bottleneck_tokens).
     """
+    # Use shorter expansion for training to save memory
+    expand_to = train_expand if train_expand is not None else num_image_tokens
     inputs_embeds, labels = _build_bottleneck_inputs(
         model, tokenizer, question, answer, bottleneck_tokens, conv_mode,
-        num_image_tokens=num_image_tokens,
+        num_image_tokens=expand_to,
     )
     output = model.forward(inputs_embeds=inputs_embeds, labels=labels)
     return output.loss
@@ -353,6 +348,7 @@ def optimize_bottleneck_per_question(
     max_samples: int = 50,
     num_steps: int = 50,
     lr: float = 0.01,
+    train_expand: int = 16,
     conv_mode: str = "llama_3",
     results_dir: str = "results/bottleneck",
     snapshot_every: int = 5,
@@ -375,6 +371,10 @@ def optimize_bottleneck_per_question(
         max_samples: Number of questions to optimise.
         num_steps: Gradient descent steps per question.
         lr: Adam learning rate.
+        train_expand: Number of token copies for training forward/backward pass.
+            Kept small (default 16) to fit in GPU memory.  The full expansion
+            (num_image_tokens) is only used for inference (answer checking)
+            which runs under no_grad.
         conv_mode: Conversation template.
         results_dir: Where to save results.
         snapshot_every: Check accuracy + decode tokens every N steps.
@@ -397,7 +397,8 @@ def optimize_bottleneck_per_question(
         )
         logger.info(
             f"Will expand {num_tokens} bottleneck token(s) to "
-            f"{num_image_tokens} positions (matching normal image region)"
+            f"{num_image_tokens} positions for inference, "
+            f"{train_expand} positions for training (memory-safe)"
         )
     else:
         logger.warning(
@@ -518,6 +519,7 @@ def optimize_bottleneck_per_question(
             loss = _bottleneck_forward_loss(
                 model, tokenizer, question_text, answer_text, tokens, conv_mode,
                 num_image_tokens=num_image_tokens,
+                train_expand=train_expand,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_([tokens], max_norm=1.0)

@@ -40,6 +40,7 @@ def main(
     num_tokens: int = 1,
     num_steps: int = 50,
     lr: float = 0.01,
+    train_expand: int = 16,
     snapshot_every: int = 5,
     model_path: str = "nyu-visionx/cambrian-8b",
     conv_mode: str = "llama_3",
@@ -56,6 +57,7 @@ def main(
         num_tokens: Number of bottleneck tokens (default 2).
         num_steps: Gradient descent steps per question.
         lr: Adam learning rate.
+        train_expand: Token copies for training pass (default 16, keeps memory safe).
         snapshot_every: Check accuracy + decode tokens every N steps.
         model_path: HuggingFace model path.
         conv_mode: Conversation template.
@@ -121,6 +123,7 @@ def main(
         max_samples=max_samples,
         num_steps=num_steps,
         lr=lr,
+        train_expand=train_expand,
         conv_mode=conv_mode,
         results_dir=results_dir,
         snapshot_every=snapshot_every,
