@@ -721,6 +721,277 @@ def optimize_bottleneck_per_question(
 
 
 # ---------------------------------------------------------------------------
+# Universal bottleneck: one token shared across all questions of the same answer
+# ---------------------------------------------------------------------------
+
+def optimize_bottleneck_universal(
+    model,
+    tokenizer,
+    benchmark: Benchmark,
+    image_processor=None,
+    num_tokens: int = 1,
+    max_samples_per_class: int = 20,
+    num_steps: int = 10,
+    lr: float = 0.01,
+    train_expand: int = 1,
+    conv_mode: str = "llama_3",
+    results_dir: str = "results/universal",
+    snapshot_every: int = 2,
+    answer_classes: list | None = None,
+) -> dict:
+    """Optimize ONE shared token per answer class across multiple questions.
+
+    Instead of per-question tokens, we ask: does a universal "A-vector" exist
+    that steers the model to answer A regardless of the question?
+
+    For each answer class (e.g. A), we:
+      1. Collect all questions with ground_truth == A
+      2. Initialize one random token
+      3. At each step, loop through all questions, sum losses, backprop once
+
+    Args:
+        model: Loaded Cambrian model.
+        tokenizer: Tokenizer.
+        benchmark: Loaded benchmark instance.
+        image_processor: Image processor (unused, for API consistency).
+        num_tokens: Number of bottleneck tokens per class (default 1).
+        max_samples_per_class: Max questions per answer class.
+        num_steps: Gradient descent steps.
+        lr: Adam learning rate.
+        train_expand: Token copies for forward pass.
+        conv_mode: Conversation template.
+        results_dir: Where to save results.
+        snapshot_every: Evaluate accuracy every N steps.
+        answer_classes: Which answers to optimize (default: A-E).
+
+    Returns:
+        Summary dict.
+    """
+    os.makedirs(results_dir, exist_ok=True)
+    tensors_dir = os.path.join(results_dir, "tensors")
+    os.makedirs(tensors_dir, exist_ok=True)
+
+    device = next(model.parameters()).device
+    hidden_dim = model.config.hidden_size
+
+    if answer_classes is None:
+        answer_classes = ["A", "B", "C", "D", "E"]
+
+    # Offload vision encoders
+    inner = getattr(model, "model", model)
+    towers = getattr(inner, "vision_tower_aux_list", None)
+    if towers:
+        for tower in towers:
+            tower.cpu()
+        torch.cuda.empty_cache()
+        logger.info(f"Offloaded {len(towers)} vision encoders to CPU")
+
+    num_image_tokens = 600
+
+    # Freeze all model parameters
+    for param in model.parameters():
+        param.requires_grad_(False)
+    logger.info("Froze all model parameters")
+
+    model.train()
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+
+    # Group questions by answer
+    samples_by_answer = defaultdict(list)
+    for sample in benchmark:
+        gt = sample.ground_truth
+        if gt in answer_classes:
+            if len(samples_by_answer[gt]) < max_samples_per_class:
+                samples_by_answer[gt].append(sample)
+
+    logger.info("Questions per class: " + ", ".join(
+        f"{a}={len(samples_by_answer[a])}" for a in answer_classes
+    ))
+
+    all_class_results = {}
+    run_start = time.time()
+
+    for ans_class in answer_classes:
+        class_samples = samples_by_answer[ans_class]
+        if not class_samples:
+            logger.warning(f"No samples for class {ans_class}, skipping")
+            continue
+
+        n_questions = len(class_samples)
+        logger.info(f"\n{'='*60}")
+        logger.info(f"OPTIMIZING CLASS {ans_class}: {n_questions} questions, {num_steps} steps")
+        logger.info(f"{'='*60}")
+
+        # One shared token for this answer class
+        tokens = torch.randn(
+            num_tokens, hidden_dim,
+            device=device, dtype=torch.float32,
+        ) * 0.02
+        tokens.requires_grad_(True)
+        optimizer = torch.optim.Adam([tokens], lr=lr)
+
+        # Save initial
+        torch.save(tokens.detach().cpu(), os.path.join(tensors_dir, f"universal_{ans_class}_initial.pt"))
+
+        # Format all questions once
+        questions = [benchmark.format_question(s) for s in class_samples]
+
+        # Track metrics
+        loss_curve = []
+        accuracy_curve = []
+        token_norms = []
+        per_question_losses = []  # [step][question_idx]
+
+        class_start = time.time()
+
+        for step in range(num_steps):
+            optimizer.zero_grad()
+            step_losses = []
+
+            # Accumulate loss across all questions
+            total_loss = torch.tensor(0.0, device=device)
+            for q_idx, (question_text, sample) in enumerate(zip(questions, class_samples)):
+                loss = _bottleneck_forward_loss(
+                    model, tokenizer, question_text, sample.ground_truth,
+                    tokens, conv_mode,
+                    num_image_tokens=num_image_tokens,
+                    train_expand=train_expand,
+                )
+                total_loss = total_loss + loss
+                step_losses.append(loss.item())
+
+            # Average loss, backprop
+            avg_loss = total_loss / n_questions
+            avg_loss.backward()
+            torch.nn.utils.clip_grad_norm_([tokens], max_norm=1.0)
+            optimizer.step()
+
+            loss_val = avg_loss.item()
+            loss_curve.append(round(loss_val, 4))
+            per_question_losses.append([round(l, 4) for l in step_losses])
+            token_norms.append(round(tokens[0].detach().norm().item(), 6))
+
+            # Snapshot: check accuracy
+            is_snapshot = ((step + 1) % snapshot_every == 0) or (step == num_steps - 1)
+            if is_snapshot:
+                n_correct = 0
+                with torch.no_grad():
+                    for question_text, sample in zip(questions, class_samples):
+                        _, _, correct = _bottleneck_check_answer(
+                            model, tokenizer, question_text, tokens,
+                            benchmark, sample, conv_mode,
+                            num_image_tokens=train_expand,
+                        )
+                        if correct:
+                            n_correct += 1
+                acc = n_correct / n_questions * 100
+                accuracy_curve.append({"step": step + 1, "accuracy": round(acc, 1), "n_correct": n_correct})
+                logger.info(
+                    f"  Class {ans_class} step {step+1}/{num_steps}: "
+                    f"avg_loss={loss_val:.3f}, acc={acc:.1f}% ({n_correct}/{n_questions})"
+                )
+            else:
+                logger.info(f"  Class {ans_class} step {step+1}/{num_steps}: avg_loss={loss_val:.3f}")
+
+            torch.cuda.empty_cache()
+
+        class_time = time.time() - class_start
+
+        # Final evaluation on all questions
+        final_predictions = []
+        with torch.no_grad():
+            for question_text, sample in zip(questions, class_samples):
+                response, prediction, correct = _bottleneck_check_answer(
+                    model, tokenizer, question_text, tokens,
+                    benchmark, sample, conv_mode,
+                    num_image_tokens=train_expand,
+                )
+                final_predictions.append({
+                    "question_id": sample.question_id,
+                    "prediction": prediction,
+                    "correct": correct,
+                })
+
+        final_acc = sum(p["correct"] for p in final_predictions) / n_questions * 100
+        final_lm_decode = _decode_tokens_lm_head(tokens.detach(), model, tokenizer, top_k=5)
+
+        # Save final token
+        torch.save(tokens.detach().cpu(), os.path.join(tensors_dir, f"universal_{ans_class}.pt"))
+
+        class_result = {
+            "answer_class": ans_class,
+            "n_questions": n_questions,
+            "num_steps": num_steps,
+            "loss_curve": loss_curve,
+            "accuracy_curve": accuracy_curve,
+            "token_norms": token_norms,
+            "per_question_losses": per_question_losses,
+            "final_accuracy": round(final_acc, 1),
+            "final_avg_loss": loss_curve[-1] if loss_curve else None,
+            "final_lm_decode": [[[w, p] for w, p in d] for d in final_lm_decode],
+            "final_predictions": final_predictions,
+            "optimization_time_s": round(class_time, 1),
+            "question_ids": [s.question_id for s in class_samples],
+        }
+        all_class_results[ans_class] = class_result
+
+        logger.info(
+            f"Class {ans_class} done: {final_acc:.1f}% accuracy, "
+            f"loss {loss_curve[0]:.2f} -> {loss_curve[-1]:.2f}, {class_time:.0f}s"
+        )
+
+    total_time = time.time() - run_start
+
+    # Summary
+    total_q = sum(r["n_questions"] for r in all_class_results.values())
+    total_correct = sum(
+        sum(p["correct"] for p in r["final_predictions"])
+        for r in all_class_results.values()
+    )
+    overall_acc = total_correct / total_q * 100 if total_q else 0
+
+    summary = {
+        "mode": "bottleneck_universal",
+        "benchmark": benchmark.name,
+        "num_tokens": num_tokens,
+        "num_image_tokens": num_image_tokens,
+        "num_steps": num_steps,
+        "learning_rate": lr,
+        "max_samples_per_class": max_samples_per_class,
+        "answer_classes": answer_classes,
+        "total_questions": total_q,
+        "total_correct": total_correct,
+        "overall_accuracy": round(overall_acc, 1),
+        "per_class": {
+            ans: {
+                "n_questions": r["n_questions"],
+                "final_accuracy": r["final_accuracy"],
+                "final_avg_loss": r["final_avg_loss"],
+                "time_s": r["optimization_time_s"],
+            }
+            for ans, r in all_class_results.items()
+        },
+        "total_time_s": round(total_time, 1),
+    }
+
+    # Save everything
+    results_file = os.path.join(results_dir, f"{benchmark.name}_universal.json")
+    with open(results_file, "w") as f:
+        json.dump(all_class_results, f, indent=2)
+
+    summary_file = os.path.join(results_dir, f"{benchmark.name}_universal_summary.json")
+    with open(summary_file, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info(f"\nUniversal optimization complete: {overall_acc:.1f}% overall ({total_correct}/{total_q})")
+    logger.info(f"Results saved to {results_dir}")
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Codebook analysis — produces graph-ready data
 # ---------------------------------------------------------------------------
 
